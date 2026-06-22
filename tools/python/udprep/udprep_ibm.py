@@ -38,10 +38,19 @@ class IBMSection(Section):
                 steps.extend(
                     [
                         ("run_ibm", lambda: self.run_ibm(backend=backend)),
-                        ("write_facets", self.write_facets),
-                        ("write_facetarea", self.write_facetarea),
                     ]
                 )
+                facets_path = Path(sim.path) / f"facets.inp.{sim.expnr}"
+                if not facets_path.exists():               
+                    steps.extend([
+                        ("write_facets", self.write_facets),
+                    ])    
+                facetarea_path = Path(sim.path) / f"facetarea.inp.{sim.expnr}"
+                if not facetarea_path.exists():               
+                    steps.extend([
+                        ("write_facetarea", self.write_facetarea),
+                    ])  
+                                                                         
                 if self.calculate_facet_sections_c:
                     steps.extend([
                         ("write_facets_unused", self.write_facets_unused),

@@ -419,9 +419,11 @@ contains
   subroutine EB
     !calculates the energy balance for every facet
     use modglobal, only: nfcts, boltz, tEB, AM, BM,CM,DM,EM,FM,GM,HM, inAM, bb,w, dumv,Tdash, timee, dtEB, tnextEB, rk3step, rhoa, cp, lEB, ntrun, lwriteEBfiles,nfaclyrs
-    use initfac, only: faclam, faccp, netsw, facem, fachf, facef, fachfi, facT, facLWin, faca,facefi,facf,facets,facTdash,facqsat,facwsoil,facf,fachurel,facd,fackappa
+    use initfac, only: faclam, faccp, netsw, facem, fachf, facef, fachfi, facT, facLWin, faca,facefi,facf,facets,facTdash,facqsat,facwsoil,facf,fachurel,facd,fackappa,&
+                       S_g,emif,emib,lam_g,d_g,c_gas,rho_gas,lam_gas,d_gas,mu_gas,glazlocidx ! glazing
     use modmpi, only: myid, comm3d, mpierr, MY_REAL, nprocs, cmyid
     use modstat_nc, only : writestat_nc, writestat_1D_nc, writestat_2D_nc
+    use modglazSEB ! glazing
     real  :: ca = 0., cb = 0., cc = 0., cd = 0., ce = 0., cf = 0.
     real  :: ab = 0.
     integer :: l, n, m,i,j
@@ -459,57 +461,68 @@ contains
         !-> T(n+1)=(F-G*dt)^-1*(F*T+w*dt)
         !where F=(C + D*A^-1*B), G=(E*A^-1*B), w=(E*A^-1*bb)
 
-
         do n = 1, nfcts
           if (facets(n) < -100) cycle
-
-          !calculate wallflux and update surface temperature
-          !! define time dependent fluxes
-          ab = boltz*facem(n)*(facT(n, 1)**3)/faclam(n, 1) ! ab*T is the Stefan-Boltzman law
-          bb(1) = -(netsw(n) + facLWin(n) + fachfi(n) + facefi(n))/faclam(n, 1) !net surface flux
-
-          !!define the matrices to solve wall heat flux
-          !! CREATE MATRICES BASED ON WALL PROPERTIES
-          i=1;m=0; !position along columns, placeholder for layerindex since only 3 layers implemented (initfac.f90)
-          do j=1,nfaclyrs
-            m=j  !!CARE!!! ONLY 3 LAYERS ARE CURRENTLY BEING READ FROM INPUT FILES. PROPERTIES OF LAYER 3 ARE USED FOR SUBSEQUENT LAYERS!!!
-            ca=1./facd(n,m)
-            BM(j+1,i)=-ca
-            BM(j+1,i+1)=ca
-            EM(j,i)=-faclam(n,m)
-            EM(j,i+1)=faclam(n,m+1)
-            cb=faccp(n,m)*facd(n,m)/2.
-            CM(j,i)=cb
-            CM(j,i+1)=cb
-            ca=faccp(n,m)*facd(n,m)**2/12.
-            DM(j,i)=ca
-            DM(j,i+1)=-ca
-            i=i+1
-          end do
-          CM(nfaclyrs+1,nfaclyrs+1)=1.
-          BM(1,1)=ab
-
-
-          w = matmul(EM, matmul(inAM,bb))*tEB !easier than loop and sum
-          HM = matmul(inAM,BM)
-          FM = CM + matmul(DM,HM)
-          GM = matmul(EM,HM)
-          HM = FM-GM*tEB
-          if (nfaclyrs == 3) then
-            GM = matinv4(HM)
+          if (facets(n) == glaz_id) then
+            Ts_m = facT(n,1:size(Ts))
+            Ts = facT(n,1:size(Ts))
+             call SEB_glaz(fachfi(n), facLWin(n), S_g(glazlocidx(n),:), &
+                            emib, emif, lam_g, d_g,&
+                            c_gas, rho_gas, mu_gas, lam_gas, d_gas,&
+                            Ts_m, Ts)
+              facT(n,1:size(Ts)) = Ts
+              if (size(facT,2) > size(Ts)) then
+                  facT(n,size(Ts)+1:size(facT,2)) = Ts(size(Ts))
+              endif             
           else
-            GM = gaussji(HM,IDM,nfaclyrs+1)
+            !calculate wallflux and update surface temperature
+            !! define time dependent fluxes
+            ab = boltz*facem(n)*(facT(n, 1)**3)/faclam(n, 1) ! ab*T is the Stefan-Boltzman law
+            bb(1) = -(netsw(n) + facLWin(n) + fachfi(n) + facefi(n))/faclam(n, 1) !net surface flux
+
+            !!define the matrices to solve wall heat flux
+            !! CREATE MATRICES BASED ON WALL PROPERTIES
+            i=1;m=0; !position along columns, placeholder for layerindex since only 3 layers implemented (initfac.f90)
+            do j=1,nfaclyrs
+              m=j  !!CARE!!! ONLY 3 LAYERS ARE CURRENTLY BEING READ FROM INPUT FILES. PROPERTIES OF LAYER 3 ARE USED FOR SUBSEQUENT LAYERS!!!
+              ca=1./facd(n,m)
+              BM(j+1,i)=-ca
+              BM(j+1,i+1)=ca
+              EM(j,i)=-faclam(n,m)
+              EM(j,i+1)=faclam(n,m+1)
+              cb=faccp(n,m)*facd(n,m)/2.
+              CM(j,i)=cb
+              CM(j,i+1)=cb
+              ca=faccp(n,m)*facd(n,m)**2/12.
+              DM(j,i)=ca
+              DM(j,i+1)=-ca
+              i=i+1
+            end do
+            CM(nfaclyrs+1,nfaclyrs+1)=1.
+            BM(1,1)=ab
+
+
+            w = matmul(EM, matmul(inAM,bb))*tEB !easier than loop and sum
+            HM = matmul(inAM,BM)
+            FM = CM + matmul(DM,HM)
+            GM = matmul(EM,HM)
+            HM = FM-GM*tEB
+            if (nfaclyrs == 3) then
+              GM = matinv4(HM)
+            else
+              GM = gaussji(HM,IDM,nfaclyrs+1)
+            end if
+            !instead of inverting matrix HM and multiplying by GM (=HM^-1) it would be waster to do a  left matrix division HM\x is faster than (HM^-1)*x
+            dumv = matmul(GM, (matmul(FM,facT(n,:))+w))
+
+            facT(n, :) = dumv
+            !calculate Temperature gradient dT/dz=>Tdash so we can output it
+            !ground heat flux = lambda dT/dz
+            w = matmul(BM, dumv)
+            facTdash(n, :) = matmul(inAM, (bb + w))
+
+            !end if
           end if
-          !instead of inverting matrix HM and multiplying by GM (=HM^-1) it would be waster to do a  left matrix division HM\x is faster than (HM^-1)*x
-          dumv = matmul(GM, (matmul(FM,facT(n,:))+w))
-
-          facT(n, :) = dumv
-          !calculate Temperature gradient dT/dz=>Tdash so we can output it
-          !ground heat flux = lambda dT/dz
-          w = matmul(BM, dumv)
-          facTdash(n, :) = matmul(inAM, (bb + w))
-
-          !end if
         end do
 
         if (lwriteEBfiles) then

@@ -355,6 +355,11 @@ module modglobal
    real, allocatable :: scasrcp(:,:,:)    !< field with data from scalarsourcep.inp.xxx containing coordinates of the source points, strength and standard deviation
    real, allocatable :: scasrcl(:,:,:)    !< field with data from scalarsourcel.inp.xxx containing coordinates of the end points of line sources, strength per unit length and standard deviation
 
+   ! glazing
+   integer :: nglaz = -1 ! no. of glazing facets 
+   integer :: nglazlyrs = 1 ! no. of glazing layers
+   logical :: lglaz = .false. ! switch that determines whether glazing is used
+   
    !trees
    integer, allocatable :: tree(:,:)             !< field with data from tree.inp.xxx
    integer :: ntree_max = 0

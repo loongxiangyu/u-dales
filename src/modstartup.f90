@@ -153,10 +153,10 @@ module modstartup
          nsolpts_u, nsolpts_v, nsolpts_w, nsolpts_c, &
          nbndpts_u, nbndpts_v, nbndpts_w, nbndpts_c, &
          nfctsecs_u, nfctsecs_v, nfctsecs_w, nfctsecs_c, lbottom, lnorec, &
-         prandtlturb, fkar, lwritefac, dtfac
+         prandtlturb, fkar, lwritefac, dtfac, nglaz ! glazing
       namelist/ENERGYBALANCE/ &
          lEB, lwriteEBfiles, lperiodicEBcorr, sinkbase, lconstW, dtEB, bldT, flrT, wsoil, wgrmax, wwilt, wfc, &
-         skyLW, GRLAI, rsmin, nfaclyrs, lfacTlyrs, lvfsparse, nnz, fraction
+         skyLW, GRLAI, rsmin, nfaclyrs, lfacTlyrs, lvfsparse, nnz, fraction, lglaz, nglazlyrs ! glazing
       namelist/SCALARS/ &
          lreadscal, lscasrc, lscasrcl, lscasrcr, &
          nsv, nscasrc, nscasrcl !!xS, yS, zS, SS, sigS

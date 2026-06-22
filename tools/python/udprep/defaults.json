@@ -122,14 +122,17 @@
     "runtime": 0.0,
     "dtSP": 10.0,
     "calc_vf": true,
-    "vf_path": ""
+    "vf_path": "",
+    "lglaz": false,
+    "nglaz": 0
   },
   "seb": {
     "facT": 288.0,
     "lfacTlyrs": false,
     "nfaclyrs": 10,
     "facT_file": "",
-    "dtEB": 10.0
+    "dtEB": 10.0,
+    "nglazlyrs":1
   },
   "vegetation": {
     "ltrees": false,

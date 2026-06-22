@@ -27,7 +27,7 @@
    module initfac
       use mpi
       use modglobal, only : ifinput, nfcts, cexpnr, libm, bldT, flrT, rsmin, wsoil, wfc, &
-                           nfaclyrs, lEB, lvfsparse, nnz, lfacTlyrs, lwritefac
+                            nfaclyrs, lEB, lvfsparse, nnz, lfacTlyrs, lwritefac, lglaz, nglaz, nglazlyrs ! glazing
       use modmpi,   only : myid, comm3d, mpierr, MY_REAL, nprocs, cmyid
       use netcdf
       implicit none
@@ -75,8 +75,24 @@
       real, allocatable    :: fachurel(:) !relative humidity at ground surface
       real, allocatable    :: facwsoil(:) !soil moisture of facets
       real, allocatable    :: faccth(:) !sum of all transfer coefficients of the facet, used in Penman Moneith, unused
-      real, allocatable    :: facqsat(:) !saturation absoulute humidity at facet temperature
-
+      real, allocatable    :: facqsat(:) !saturation absoulute humidity at facet temperature   
+      ! glazing
+      real, allocatable    :: S_g(:,:) !solar radiation on glazing layers
+      real, allocatable    :: emib(:) !emissivity of the glazing  layers (back)
+      real, allocatable    :: emif(:) !emissivity of the glazing  layers(front)
+      real, allocatable    :: lam_g(:) !thermal conductivity of the glazing layers
+      real, allocatable    :: d_g(:) !thickness of the glazing layers
+      real, allocatable    :: c_gas(:) !specific heat capacity of the gas in the glazing system
+      real, allocatable    :: rho_gas(:) !density of the gas in the glazing system
+      real, allocatable    :: lam_gas(:) !thermal conductivity of the gas in the glazing system
+      real, allocatable    :: d_gas(:) !thickness of the gas layer in the glazing system
+      real, allocatable    :: mu_gas(:) !dynamic viscosity of the gas in the glazing system
+      real, allocatable    :: Ts_m(:) !surface temperature of the glazing system (prior step)
+      real, allocatable    :: Ts(:) !surface temperature of the glazing system (current step)
+      integer, allocatable :: locglaz(:) !location of glazing facets
+      integer, allocatable :: glazlocidx(:) !map from facet id to glazing row index
+      real :: glaz_z0m,glaz_z0h !glazing roughness lengths for momentum and heat
+      integer :: glaz_id=-200524 !facets with this walltype are considered glazing
       !misc
       integer, allocatable :: typeloc(:) !array to match the walltype to sequential integers for indexing
       integer              :: nfactypes = 0 !number of different factypes, will be determined automatically
@@ -160,6 +176,23 @@
           end if
         end if
 
+        if (lglaz) then ! glazing
+           allocate(S_g(1:nglaz,1:nglazlyrs*2)); S_g = 0.
+           allocate(emib(1:nglazlyrs)); emib = 0.
+           allocate(emif(1:nglazlyrs)); emif = 0.
+           allocate(lam_g(1:nglazlyrs)); lam_g = 0.
+           allocate(d_g(1:nglazlyrs)); d_g = 0.
+           allocate(c_gas(1:nglazlyrs-1)); c_gas = 0.
+           allocate(rho_gas(1:nglazlyrs-1)); rho_gas = 0.
+           allocate(lam_gas(1:nglazlyrs-1)); lam_gas = 0.
+           allocate(d_gas(1:nglazlyrs-1)); d_gas = 0.
+           allocate(mu_gas(1:nglazlyrs-1)); mu_gas = 0.
+           allocate(Ts_m(1:nglazlyrs*2)); Ts_m = 0.
+           allocate(Ts(1:nglazlyrs*2)); Ts = 0.
+           allocate(locglaz(nglaz))
+            allocate(glazlocidx(0:nfcts)); glazlocidx = 0
+        end if
+
         ! Read files
         if (myid == 0 .and. libm) then
           nfactypes = -3 !3 lines as headers
@@ -196,6 +229,42 @@
         !value: [ 0, 0, 0,0,0,0,0,0,0]  -> [ 1, 0, 2,0,3,4,5,0,6]
         allocate (typeloc(int(minval(factypes(:, 1))):int(maxval(factypes(:, 1)))))
 
+        if (myid == 0 .and. libm .and. lglaz) then ! glazing
+          open (ifinput, file='aknet_glaz.txt')
+          do n = 1, nglaz
+              read (ifinput, *) locglaz(n), S_g(n,1:2*nglazlyrs)
+          end do
+          close (ifinput)
+
+          do n = 1, nglaz
+            if (locglaz(n) >= 0 .and. locglaz(n) <= nfcts) then
+              glazlocidx(locglaz(n)) = n
+            end if
+          end do
+
+          open (ifinput, file='aprop_glaz.txt')
+          read (ifinput, *) glaz_id, emib(:), emif(:), lam_g(:), d_g(:), &
+                            c_gas(:), rho_gas(:), lam_gas(:), d_gas(:), mu_gas(:),&
+                            glaz_z0m, glaz_z0h
+          close (ifinput)    
+
+          call MPI_BCAST(locglaz, nglaz, MPI_Integer, 0, comm3d, mpierr)
+          call MPI_BCAST(glazlocidx, nfcts + 1, MPI_Integer, 0, comm3d, mpierr)
+          call MPI_BCAST(S_g, (nglaz)*(2*nglazlyrs), MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(glaz_id, 1, MPI_Integer, 0, comm3d, mpierr)
+          call MPI_BCAST(emib, nglazlyrs, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(emif, nglazlyrs, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(lam_g, nglazlyrs, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(d_g, nglazlyrs, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(c_gas, nglazlyrs-1, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(rho_gas, nglazlyrs-1, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(lam_gas, nglazlyrs-1, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(d_gas, nglazlyrs-1, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(mu_gas, nglazlyrs-1, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(glaz_z0m, 1, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(glaz_z0h, 1, MY_REAL, 0, comm3d, mpierr)
+        end if
+
         if (myid .eq. 0 .and. libm) then
           typeloc = 0
             do n = 1, nfactypes
@@ -210,35 +279,44 @@
               close (ifinput)
 
               do n = 1, nfcts
-                i = typeloc(facets(n))
-                faclGR(n) = (abs(factypes(i, 2) - 1.00) < 1.0D-5) !logic for green surface, conversion from real to logical
-                facz0(n) = factypes(i, 3)  !surface momentum roughness
-                facz0h(n) = factypes(i, 4) !surface heat & moisture roughness
-                !facalb(n) = factypes(i, 5) !surface shortwave albedo
-                facem(n) = factypes(i, 6)  !surface longwave emissivity
+                if (facets(n) == glaz_id) then
+                  faclGR(n) = .false. !logic for green surface, conversion from real to logical
+                  facz0(n) = glaz_z0m  !surface momentum roughness
+                  facz0h(n) = glaz_z0h !surface heat & moisture roughness
+                  !facalb(n) = factypes(i, 5) !surface shortwave albedo
+                  facem(n) = emif(1)  !surface longwave emissivity
 
-                if (facets(n) < -100) then !it's a bounding wall, or more generally a facet for which we don't want to model SEB
-                  do j = 1, nfaclyrs
-                    facd(n,j) = 0.
-                    faclam(n, j) = 0.
-                    faccp(n, j) = 0.
-                  end do
-                else
-                  do j = 1, nfaclyrs !for all layers
-                    facd(n, j) = factypes(i, 6 + j) !facet thickness of layer j
-                    faccp(n, j) = factypes(i, 6 + nfaclyrs + j) !specific heat capacity of layer j
-                    !faclam(n, j) = factypes(i, 6 + 2 * nfaclyrs + j) !heat conductivity of layer j
-                  end do
-                  faclam(n, 1) = factypes(i, 6 + 2 * nfaclyrs + 1)
-                  do j = 2, nfaclyrs
-                    faclam(n, j) = (factypes(i, 6 + 2 * nfaclyrs + j - 1) + factypes(i, 6 + 2 * nfaclyrs + j))/2. !inverse of heat conductivity of layer j
-                  end do
+                else                
+                  i = typeloc(facets(n))
+                  faclGR(n) = (abs(factypes(i, 2) - 1.00) < 1.0D-5) !logic for green surface, conversion from real to logical
+                  facz0(n) = factypes(i, 3)  !surface momentum roughness
+                  facz0h(n) = factypes(i, 4) !surface heat & moisture roughness
+                  !facalb(n) = factypes(i, 5) !surface shortwave albedo
+                  facem(n) = factypes(i, 6)  !surface longwave emissivity
+
+                  if (facets(n) < -100) then !it's a bounding wall, or more generally a facet for which we don't want to model SEB
+                    do j = 1, nfaclyrs
+                      facd(n,j) = 0.
+                      faclam(n, j) = 0.
+                      faccp(n, j) = 0.
+                    end do
+                  else
+                    do j = 1, nfaclyrs !for all layers
+                      facd(n, j) = factypes(i, 6 + j) !facet thickness of layer j
+                      faccp(n, j) = factypes(i, 6 + nfaclyrs + j) !specific heat capacity of layer j
+                      !faclam(n, j) = factypes(i, 6 + 2 * nfaclyrs + j) !heat conductivity of layer j
+                    end do
+                    faclam(n, 1) = factypes(i, 6 + 2 * nfaclyrs + 1)
+                    do j = 2, nfaclyrs
+                      faclam(n, j) = (factypes(i, 6 + 2 * nfaclyrs + j - 1) + factypes(i, 6 + 2 * nfaclyrs + j))/2. !inverse of heat conductivity of layer j
+                    end do
+                  end if
+                  faclam(n, nfaclyrs+1) = faclam(n, nfaclyrs)
+
+                  ! do j= 1,nfaclyrs+1
+                  !   fackappa(n, j) = factypes(i, 6 + 3 * nfaclyrs + j) !heat diffusivity of layer 1
+                  ! end do
                 end if
-                faclam(n, nfaclyrs+1) = faclam(n, nfaclyrs)
-
-                ! do j= 1,nfaclyrs+1
-                !   fackappa(n, j) = factypes(i, 6 + 3 * nfaclyrs + j) !heat diffusivity of layer 1
-                ! end do
               end do
 
               if (lEB .or. lwritefac) then

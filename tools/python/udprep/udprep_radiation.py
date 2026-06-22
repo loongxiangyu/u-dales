@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Tuple
 from pathlib import Path
 
 import numpy as np
+from .udprep_glazing import calc_optiproperties # glazing
 from .udprep import Section, SectionSpec
 from .directshortwave import DirectShortwaveSolver
 from .solar import nsun_from_angles, solar_position_python, solar_state, solar_strength_ashrae
@@ -424,6 +425,66 @@ class RadiationSection(Section):
                 break
 
         return knet
+    
+    def calc_reflections_sw_glaz(
+        self,
+        sdir: np.ndarray,
+        dsky: float,
+        vf,
+        svf: np.ndarray,
+        albedo: np.ndarray,
+        al_spec: np.ndarray, # glazing
+        lspec: np.ndarray,
+        tol: float = 0.01,
+        max_iter: int = 1000,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute net shortwave including reflections (tools/SEB/netShortwave.m).
+
+        Parameters
+        ----------
+        sdir : np.ndarray
+            Direct shortwave on facets [W/m^2].
+        dsky : float
+            Diffuse sky irradiance [W/m^2].
+        vf : array-like or sparse matrix
+            View factor matrix between facets.
+        svf : np.ndarray
+            Sky view factor per facet.
+        albedo : np.ndarray
+            Facet albedo (0-1).
+        tol : float
+            Convergence threshold for additional absorbed energy.
+        max_iter : int
+            Safety cap on the iteration count.
+        """
+        sdir = np.asarray(sdir, dtype=float)
+        svf = np.asarray(svf, dtype=float)
+        albedo = np.asarray(albedo, dtype=float)
+        if sdir.shape != svf.shape or sdir.shape != albedo.shape:
+            raise ValueError("sdir, svf, and albedo must have matching shapes")
+        if tol <= 0.0:
+            raise ValueError("tol must be > 0")
+        if max_iter <= 0:
+            raise ValueError("max_iter must be > 0")
+        
+        kin0 = (1-lspec)*sdir + dsky * svf # if the facet is glazing, kin0 only includes diffuse radiation,
+        kin = sdir + dsky * svf            # and the first reflection (kout) is separeted into specular and diffuse parts.
+        knet = (1.0 - albedo) * kin0       # knet is not used for glazing facets, but it is used for non-glazing facets.
+        kout = albedo * kin0 + lspec*sdir*al_spec    
+        
+        for _ in range(max_iter):
+            vf_kout = vf @ kout
+            kadd = (1.0 - albedo) * vf_kout
+            kout = albedo * vf_kout
+            knet = knet + kadd
+            kin = kin + vf_kout
+            
+            denom = np.maximum(knet - kadd, 1.0e-12)
+            if np.max(kadd / denom) < tol:
+                break
+        
+        return knet,kin    
 
     def calc_short_wave(
         self,
@@ -828,6 +889,104 @@ class RadiationSection(Section):
 
         raise ValueError(f"Unsupported isolar value: {self.isolar}")
 
+    def calc_knet_glaz(
+            self,
+            sdir: np.ndarray, 
+            dsky: float, 
+            albedo: np.ndarray,
+            vf, 
+            svf: np.ndarray, 
+            phi: np.ndarray ,
+            facet_types: np.ndarray, 
+        )-> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+            
+            al_room = 0.2  # albedo of room surfaces (default 0.2)
+            T_0 = self.glaz.T_0 # normal-incidence transmittance for each glazing layer [-]
+            Rf_0 = self.glaz.Rf_0 # normal-incidence front reflectance for each glazing layer [-]
+            Rb_0 = self.glaz.Rb_0 # normal-incidence back reflectance for each glazing layer [-]
+            d_g = self.glaz.d_g # thickness of each glazing layer [m]
+            d_gas = self.glaz.d_gas # thickness of each gas layer [m]
+            id_glaz=self.glaz.id    
+            nglaz = np.count_nonzero(facet_types == id_glaz) # number of glazing facets
+            poglaz = np.where(facet_types == id_glaz)[0] # poglaz gives the indices of glazing facets within all facets
+            sdif = dsky * svf
+                    
+            al_glaz = [] # for debugging, direct and diffuse reflectance of each glazing surface
+            knet_glaz = [] # absorbed shortwave radiation (heat source in SEB equation) of each glazing surface
+            solar = [] # for debugging, direct radiation,  diffuse plus reflected radiation
+            al_spec=np.zeros(albedo.shape) # specular albedo for glazing facets, which is the front reflectance of the glazing system at an incident angle [-]
+            lspec=np.zeros(albedo.shape) # boolean array to indicate which facets are glazing (1) and which are not (0)
+            Tw = np.zeros(nglaz)  # transmittance at an incident angle for the entire system [-]
+            Rfw = np.zeros(nglaz) # front reflectance at an incident angle for the entire system [-]
+            Rbw = np.zeros(nglaz) # back reflectance at an incident angle for the entire system [-]
+            Aw = np.zeros((nglaz, len(T_0))) # absorptance for each glazing layer in the glazing system [-]
+            TwD_F = np.zeros(nglaz) # diffuse transmittance for the entire system [-]
+            RfwD_F = np.zeros(nglaz) # diffuse front reflectance for the entire system [-]
+            RbwD_F = np.zeros(nglaz) # diffuse back reflectance for the entire system [-]
+            AwD_F = np.zeros((nglaz, len(T_0))) # diffuse absorptance for each glazing layer in the entire system [-]
+            TwD_B = np.zeros(nglaz) # diffuse transmittance for the entire system Backforward [-]
+            RfwD_B = np.zeros(nglaz) # diffuse front reflectance for the entire system Backforward [-]
+            RbwD_B = np.zeros(nglaz) # diffuse back reflectance for the entire system Backforward [-]
+            AwD_B = np.zeros((nglaz, len(T_0))) # diffuse absorptance for each glazing layer in the entire system Backforward [-]
+            
+            # calculate the overall optical properties of the glazing system
+            for i, j in enumerate(poglaz): # i is the glazing-facet counter, j is its index in all facets
+                (                                                             
+                    Tw[i], Rfw[i], Rbw[i], Aw[i, :],
+                    TwD_F[i], RfwD_F[i], RbwD_F[i], AwD_F[i, :]
+                ) = calc_optiproperties(T_0, Rf_0, Rb_0, d_g, d_gas, phi[j])
+
+                (
+                    _, _, _, _,
+                    TwD_B[i], RfwD_B[i], RbwD_B[i], AwD_B[i, :]
+                ) = calc_optiproperties(
+                    np.flip(T_0), np.flip(Rf_0), np.flip(Rb_0), np.flip(d_g), np.flip(d_gas), phi[j]
+                )
+                albedo[j] = RfwD_F[i]
+                al_spec[j] = Rfw[i]
+                lspec[j] = 1
+                al_glaz.append([j, Rfw[i], RfwD_F[i]])
+        
+        # calculate the total incoming shortwave radiation and net shortwave radiation for each facet     
+            knet, kin = self.calc_reflections_sw_glaz(sdir, dsky, vf, svf, albedo, al_spec, lspec)
+            
+        # calculate the absorbed shortwave radiation for each glazing layer in the glazing system
+            for i, j in enumerate(poglaz):
+                # shortwave radiation transmitted through the glazing system
+                K_trans = Tw[i] * sdir[j] + TwD_F[i] * (kin[j] - sdir[j])
+                
+                # shortwave radiation reflected by the room side
+                K_room = K_trans * al_room / (1 - RfwD_B[i] * al_room)
+                
+                # shortwave radiation absorbed by each glazing layer
+                K_a = Aw[i, :] * sdir[j] + AwD_F[i] * (kin[j] - sdir[j]) + np.flip(K_room * AwD_B[i, :])
+                
+                # absorbed shortwave radiation of each glazing surfaces
+                K_a = np.repeat(K_a / 2, 2)
+                
+                knet_glaz.append(np.concatenate(([j],K_a)))
+                solar.append(np.concatenate((
+                    [j],
+                    [sdir[j]],
+                    [kin[j] - sdir[j]]
+                )))
+                
+            return np.array(knet), np.array(knet_glaz), np.array(al_glaz), np.array(solar)
+
+            for i, j in enumerate(poglaz):
+                R_trans = Tw[i] * sdir[j] + TwD_F[i] * (kin[j] - sdir[j])
+                R_room = R_trans * al_room / (1 - RfwD_B[i] * al_room)
+                R_a = Aw[i, :] * sdir[j] + AwD_F[i] * (kin[j] - sdir[j]) + np.flip(R_room * AwD_B[i, :])
+                R_a = np.repeat(R_a / 2, 2)
+                knet_glaz.append(np.concatenate(([j],R_a)))
+                solar.append(np.concatenate((
+                    [j],
+                    [sdir[j]],
+                    [kin[j] - sdir[j]]
+                )))
+                
+            return np.array(knet), np.array(knet_glaz), np.array(al_glaz), np.array(solar)
+
     def _compute_knet(
         self,
         nsun: np.ndarray,
@@ -854,7 +1013,75 @@ class RadiationSection(Section):
         if lscatter:
             if vf is None or svf is None:
                 raise ValueError("View factors are required for shortwave reflections")
-            knet = self.calc_reflections_sw(sdir, dsky, vf, svf, albedo)
+
+            if self.lglaz:
+                sim = self._require_sim()
+                if sim.nfaclyrs < 2*sim.nglazlyrs:
+                    raise ValueError(
+                        f"When glazing is enabled, the number of facet layers ({sim.nfaclyrs}) "
+                        f"must be at least twice the number of glazing layers ({sim.nglazlyrs})."
+                    )
+                expnr = getattr(sim, "expnr", "")
+                out_dir = Path(sim.path) if getattr(sim, "path", None) is not None else Path.cwd()
+                out_dir.mkdir(parents=True, exist_ok=True)
+                nsun_unit = nsun / np.linalg.norm(nsun) 
+                cos_inc_all = np.dot(sim.geom.stl.face_normals, nsun_unit)
+                cos_inc_all = np.where(cos_inc_all > 0.0, cos_inc_all, 0.0)
+                phi = np.arccos(np.clip(cos_inc_all, -1.0, 1.0)) # incident angle in radians
+                facet_types = self.facs["typeid"]
+                (
+                    knet, knet_glaz, al_glaz, solar
+                ) = self.calc_knet_glaz(sdir,dsky, albedo,vf, svf, phi, facet_types 
+                )
+                emib=self.glaz.emib # back emissivity for each glazing layer [-]
+                emif=self.glaz.emif # front emissivity for each glazing layer [-]
+                lam_g= self.glaz.lam_g # conductivitly of glazing [W/mK]
+                d_g = self.glaz.d_g # thickness of each glazing layer [m]
+                c_gas = self.glaz.c_gas # specific heat capatity of gas [J/kgK]
+                rho_gas = self.glaz.rho_gas # density of gas [kg/m^3]
+                lam_gas = self.glaz.lam_gas # conductivity of gas [W/mK]
+                d_gas = self.glaz.d_gas # thickness of each gas layer [m]
+                mu_gas = self.glaz.mu_gas # dynamic viscosity of gas [kg/ms]
+                
+                # output glazing properties and absorbed shortwave radiation will be used in SEB calculation          
+                knet_glaz_path = out_dir / "aknet_glaz.txt"
+                knet_glaz_fmt = ["%d"] + ["%8.4f"] * len(self.glaz.T_0)*2
+                np.savetxt(knet_glaz_path, np.asarray(knet_glaz), fmt=knet_glaz_fmt)
+                prop_glaz_path= out_dir / "aprop_glaz.txt"
+                prop_glaz_fmt = (
+                    ["%d"]
+                    + ["%8.6f"] * (
+                        len(self.glaz.T_0) * 4
+                        + (len(self.glaz.T_0) - 1) * 4
+                    )
+                    + ["%10.4e"] * (
+                        2 + (len(self.glaz.T_0) - 1)
+                    )
+                )
+                prop_glaz = np.concatenate((
+                    np.atleast_1d(self.glaz.id),
+                    emib,
+                    emif,
+                    lam_g,
+                    d_g,
+                    c_gas,
+                    rho_gas,
+                    lam_gas,
+                    d_gas,
+                    mu_gas,
+                    np.atleast_1d(self.glaz.z0m),
+                    np.atleast_1d(self.glaz.z0h),
+                ))
+                np.savetxt(prop_glaz_path, prop_glaz[None, :], fmt=prop_glaz_fmt)
+                # for test and debug
+                # al_glaz_path = out_dir / "al_glaz.txt"
+                # np.savetxt(al_glaz_path, np.asarray(al_glaz), fmt=["%d", "%8.4f", "%8.4f"])
+                # solar_path = out_dir / "asolar.txt"
+                # np.savetxt(solar_path, np.asarray(solar), fmt=["%d", "%8.4f", "%8.4f"])
+                sim.save_param("nglaz", int(len(knet_glaz)))
+            else:
+                knet = self.calc_reflections_sw(sdir, dsky, vf, svf, albedo)
+            
         else:
             if fss is None:
                 raise ValueError("Fss is required for non-scattering shortwave")
