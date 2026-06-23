@@ -229,24 +229,26 @@
         !value: [ 0, 0, 0,0,0,0,0,0,0]  -> [ 1, 0, 2,0,3,4,5,0,6]
         allocate (typeloc(int(minval(factypes(:, 1))):int(maxval(factypes(:, 1)))))
 
-        if (myid == 0 .and. libm .and. lglaz) then ! glazing
-          open (ifinput, file='aknet_glaz.txt')
-          do n = 1, nglaz
-              read (ifinput, *) locglaz(n), S_g(n,1:2*nglazlyrs)
-          end do
-          close (ifinput)
+        if (libm .and. lglaz) then ! glazing
+          if (myid == 0) then
+            open (ifinput, file='aknet_glaz.txt')
+            do n = 1, nglaz
+                read (ifinput, *) locglaz(n), S_g(n,1:2*nglazlyrs)
+            end do
+            close (ifinput)
 
-          do n = 1, nglaz
-            if (locglaz(n) >= 0 .and. locglaz(n) <= nfcts) then
-              glazlocidx(locglaz(n)) = n
-            end if
-          end do
+            do n = 1, nglaz
+              if (locglaz(n) >= 0 .and. locglaz(n) <= nfcts) then
+                glazlocidx(locglaz(n)) = n
+              end if
+            end do
 
-          open (ifinput, file='aprop_glaz.txt')
-          read (ifinput, *) glaz_id, emib(:), emif(:), lam_g(:), d_g(:), &
-                            c_gas(:), rho_gas(:), lam_gas(:), d_gas(:), mu_gas(:),&
-                            glaz_z0m, glaz_z0h
-          close (ifinput)    
+            open (ifinput, file='aprop_glaz.txt')
+            read (ifinput, *) glaz_id, emib(:), emif(:), lam_g(:), d_g(:), &
+                              c_gas(:), rho_gas(:), lam_gas(:), d_gas(:), mu_gas(:),&
+                              glaz_z0m, glaz_z0h
+            close (ifinput)
+          end if
 
           call MPI_BCAST(locglaz, nglaz, MPI_Integer, 0, comm3d, mpierr)
           call MPI_BCAST(glazlocidx, nfcts + 1, MPI_Integer, 0, comm3d, mpierr)
