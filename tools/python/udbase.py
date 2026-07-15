@@ -453,7 +453,7 @@ class UDBase:
         self._lffacet_sections = True
         
         # glazing sysytem
-        if self.lglaz:                     # glazing
+        if getattr(self, 'lglaz', False):  # glazing
             material_path = self.path / "material.toml"
             if not material_path.is_file():
                 raise FileNotFoundError(f"material.toml not found: {material_path}")
