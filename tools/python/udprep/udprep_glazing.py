@@ -160,17 +160,13 @@ def calc_TRA_EP(T, Rf, Rb): # recursive calculation of transmittance, reflectanc
     return Tw, Rfw, Rbw, Aw
 
 
-def calc_optiproperties(T_0, Rf_0, Rb_0, d_g, d_gas, phi):
+def calc_optiprop_dir(T_0, Rf_0, Rb_0, d_g, phi):
     # parameters initialization
     N = len(T_0)  # N glazing layers
     T_phi = np.zeros(N)  # transmittance at an incident angle for each glazing layer
     Rf_phi = np.zeros(N)  # front reflectance at an incident angle for each glazing layer
     Rb_phi = np.zeros(N)  # back reflectance at an incident angle for each glazing layer
-    T_D = np.zeros(N)  # hemispherical transmittance for each glazing layer
-    Rf_D = np.zeros(N)  # hemispherical front reflectance for each glazing layer
-    Rb_D = np.zeros(N)  # hemispherical back reflectance for each glazing layer
-    d = np.sum(d_g) + np.sum(d_gas)  # thickness of the entire glazing system [m]
-    
+
     # optical properties for direct radiation
     # calculate optical properties for each glass in a specific incident angle
     for j in range(N):
@@ -183,12 +179,21 @@ def calc_optiproperties(T_0, Rf_0, Rb_0, d_g, d_gas, phi):
 
     # calculate optical properties for the entire system
     if N == 1:
-        Tw = T_phi
-        Rfw = Rf_phi
-        Rbw = Rb_phi
+        Tw = T_phi.item()
+        Rfw = Rf_phi.item()
+        Rbw = Rb_phi.item()
         Aw = 1 - Tw - Rfw
     else:
         Tw, Rfw, Rbw, Aw = calc_TRA_EP(T_phi, Rf_phi, Rb_phi)
+
+    return Tw, Rfw, Rbw, Aw
+
+def calc_optiprop_dif(T_0, Rf_0, Rb_0, d_g):
+    # parameters initialization
+    N = len(T_0)  # N glazing layers
+    T_D = np.zeros(N)  # hemispherical transmittance for each glazing layer
+    Rf_D = np.zeros(N)  # hemispherical front reflectance for each glazing layer
+    Rb_D = np.zeros(N)  # hemispherical back reflectance for each glazing layer
 
     # optical properties for diffuse radiaiton
     deg = np.arange(0, 91, 1)
@@ -209,13 +214,13 @@ def calc_optiproperties(T_0, Rf_0, Rb_0, d_g, d_gas, phi):
         T_D[i] = np.trapezoid(T * weight, phi)
         Rf_D[i] = np.trapezoid(Rf * weight, phi)
         Rb_D[i] = np.trapezoid(Rb * weight, phi)
-
+        
     if N == 1:
-        TwD = T_D
-        RfwD = Rf_D
-        RbwD = Rb_D
+        TwD = T_D.item()
+        RfwD = Rf_D.item()
+        RbwD = Rb_D.item()
         AwD = 1 - TwD - RfwD
     else:
         TwD, RfwD, RbwD, AwD = calc_TRA_EP(T_D, Rf_D, Rb_D)
 
-    return Tw, Rfw, Rbw, Aw, TwD, RfwD, RbwD, AwD
+    return TwD, RfwD, RbwD, AwD

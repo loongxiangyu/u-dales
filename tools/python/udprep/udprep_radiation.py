@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 from pathlib import Path
 
 import numpy as np
-from .udprep_glazing import calc_optiproperties # glazing
+from .udprep_glazing import calc_optiprop_dir, calc_optiprop_dif # glazing
 from .udprep import Section, SectionSpec
 from .directshortwave import DirectShortwaveSolver
 from .solar import nsun_from_angles, solar_position_python, solar_state, solar_strength_ashrae
@@ -920,32 +920,34 @@ class RadiationSection(Section):
             Rfw = np.zeros(nglaz) # front reflectance at an incident angle for the entire system [-]
             Rbw = np.zeros(nglaz) # back reflectance at an incident angle for the entire system [-]
             Aw = np.zeros((nglaz, len(T_0))) # absorptance for each glazing layer in the glazing system [-]
-            TwD_F = np.zeros(nglaz) # diffuse transmittance for the entire system [-]
-            RfwD_F = np.zeros(nglaz) # diffuse front reflectance for the entire system [-]
-            RbwD_F = np.zeros(nglaz) # diffuse back reflectance for the entire system [-]
-            AwD_F = np.zeros((nglaz, len(T_0))) # diffuse absorptance for each glazing layer in the entire system [-]
-            TwD_B = np.zeros(nglaz) # diffuse transmittance for the entire system Backforward [-]
-            RfwD_B = np.zeros(nglaz) # diffuse front reflectance for the entire system Backforward [-]
-            RbwD_B = np.zeros(nglaz) # diffuse back reflectance for the entire system Backforward [-]
-            AwD_B = np.zeros((nglaz, len(T_0))) # diffuse absorptance for each glazing layer in the entire system Backforward [-]
+            TwD_F = 0 # diffuse transmittance for the entire system [-]
+            RfwD_F = 0 # diffuse front reflectance for the entire system [-]
+            RbwD_F = 0 # diffuse back reflectance for the entire system [-]
+            AwD_F = np.zeros( len(T_0)) # diffuse absorptance for each glazing layer in the entire system [-]
+            TwD_B = 0 # diffuse transmittance for the entire system Backward [-]
+            RfwD_B = 0 # diffuse front reflectance for the entire system Backward [-]
+            RbwD_B = 0 # diffuse back reflectance for the entire system Backward [-]
+            AwD_B = np.zeros(len(T_0)) # diffuse absorptance for each glazing layer in the entire system Backward [-]
+            
+            (                                                             
+                TwD_F, RfwD_F, RbwD_F, AwD_F[:]
+            ) = calc_optiprop_dif(T_0, Rf_0, Rb_0, d_g)            
+            (                                                             
+                TwD_B, RfwD_B, RbwD_B, AwD_B[:]
+            ) = calc_optiprop_dif(
+                np.flip(T_0), np.flip(Rf_0), np.flip(Rb_0), np.flip(d_g)
+                ) 
             
             # calculate the overall optical properties of the glazing system
             for i, j in enumerate(poglaz): # i is the glazing-facet counter, j is its index in all facets
                 (                                                             
-                    Tw[i], Rfw[i], Rbw[i], Aw[i, :],
-                    TwD_F[i], RfwD_F[i], RbwD_F[i], AwD_F[i, :]
-                ) = calc_optiproperties(T_0, Rf_0, Rb_0, d_g, d_gas, phi[j])
+                    Tw[i], Rfw[i], Rbw[i], Aw[i, :]
+                ) = calc_optiprop_dir(T_0, Rf_0, Rb_0, d_g, phi[j])
 
-                (
-                    _, _, _, _,
-                    TwD_B[i], RfwD_B[i], RbwD_B[i], AwD_B[i, :]
-                ) = calc_optiproperties(
-                    np.flip(T_0), np.flip(Rf_0), np.flip(Rb_0), np.flip(d_g), np.flip(d_gas), phi[j]
-                )
-                albedo[j] = RfwD_F[i]
+                albedo[j] = RfwD_F
                 al_spec[j] = Rfw[i]
                 lspec[j] = 1
-                al_glaz.append([j, Rfw[i], RfwD_F[i]])
+                al_glaz.append([j, Rfw[i],RfwD_F])
         
         # calculate the total incoming shortwave radiation and net shortwave radiation for each facet     
             knet, kin = self.calc_reflections_sw_glaz(sdir, dsky, vf, svf, albedo, al_spec, lspec)
@@ -953,13 +955,13 @@ class RadiationSection(Section):
         # calculate the absorbed shortwave radiation for each glazing layer in the glazing system
             for i, j in enumerate(poglaz):
                 # shortwave radiation transmitted through the glazing system
-                K_trans = Tw[i] * sdir[j] + TwD_F[i] * (kin[j] - sdir[j])
+                K_trans = Tw[i] * sdir[j] + TwD_F * (kin[j] - sdir[j])
                 
                 # shortwave radiation reflected by the room side
-                K_room = K_trans * al_room / (1 - RfwD_B[i] * al_room)
+                K_room = K_trans * al_room / (1 - RfwD_B * al_room)
                 
                 # shortwave radiation absorbed by each glazing layer
-                K_a = Aw[i, :] * sdir[j] + AwD_F[i] * (kin[j] - sdir[j]) + np.flip(K_room * AwD_B[i, :])
+                K_a = Aw[i, :] * sdir[j] + AwD_F[:] * (kin[j] - sdir[j]) + np.flip(K_room * AwD_B[:])
                 
                 # absorbed shortwave radiation of each glazing surfaces
                 K_a = np.repeat(K_a / 2, 2)
@@ -974,9 +976,9 @@ class RadiationSection(Section):
             return np.array(knet), np.array(knet_glaz), np.array(al_glaz), np.array(solar)
 
             for i, j in enumerate(poglaz):
-                R_trans = Tw[i] * sdir[j] + TwD_F[i] * (kin[j] - sdir[j])
-                R_room = R_trans * al_room / (1 - RfwD_B[i] * al_room)
-                R_a = Aw[i, :] * sdir[j] + AwD_F[i] * (kin[j] - sdir[j]) + np.flip(R_room * AwD_B[i, :])
+                R_trans = Tw[i] * sdir[j] + TwD_F * (kin[j] - sdir[j])
+                R_room = R_trans * al_room / (1 - RfwD_B * al_room)
+                R_a = Aw[i, :] * sdir[j] + AwD_F[:] * (kin[j] - sdir[j]) + np.flip(R_room * AwD_B[:])
                 R_a = np.repeat(R_a / 2, 2)
                 knet_glaz.append(np.concatenate(([j],R_a)))
                 solar.append(np.concatenate((
