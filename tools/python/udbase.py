@@ -452,7 +452,7 @@ class UDBase:
         self._lffactypes = True
         self._lffacet_sections = True
         
-        # glazing sysytem
+        # glazing system
         if getattr(self, 'lglaz', False):  # glazing
             material_path = self.path / "material.toml"
             if not material_path.is_file():

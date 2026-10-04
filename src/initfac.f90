@@ -282,6 +282,11 @@
 
               do n = 1, nfcts
                 if (facets(n) == glaz_id) then
+                  if (glazlocidx(n) == 0) then ! glazing
+                    write(0, *) 'ERROR: glazing facet ', n, ' has no row in aknet_glaz.txt'
+                    write(0, *) 'aknet_glaz.txt must list 1-based facet numbers'
+                    stop 1
+                  end if
                   faclGR(n) = .false. !logic for green surface, conversion from real to logical
                   facz0(n) = glaz_z0m  !surface momentum roughness
                   facz0h(n) = glaz_z0h !surface heat & moisture roughness
