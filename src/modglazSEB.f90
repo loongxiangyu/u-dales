@@ -36,11 +36,12 @@ contains
         if (gamEff >= 0.0 .and. gamEff < 15.0) then
             Nu_in = 0.13 * RaH ** (1.0 / 3.0)
         else if (gamEff >= 15.0 .and. gamEff <= 90.0) then
-            RaCV = 2.5e5 * exp(0.72 * gamEff) / max(sinGam, epsilon(1.0))
+            ! ISO 15099: Ra_cv = 2.5e5 * (exp(0.72*gamma) / sin(gamma))**(1/5); both branches meet at Ra_H = Ra_cv
+            RaCV = 2.5e5 * (exp(0.72 * gamEff) / max(sinGam, epsilon(1.0))) ** (1.0 / 5.0)
             if (RaH <= RaCV) then
                 Nu_in = 0.56 * (RaH * sinGam) ** (1.0 / 4.0)
             else
-                Nu_in = 0.13 * RaH ** (1.0 / 3.0) - RaCV ** (1.0 / 3.0) + &
+                Nu_in = 0.13 * (RaH ** (1.0 / 3.0) - RaCV ** (1.0 / 3.0)) + &
                         0.56 * (RaCV * sinGam) ** (1.0 / 4.0)
             end if
         else if (gamEff > 90.0 .and. gamEff <= 179.0) then
@@ -163,18 +164,21 @@ contains
     end subroutine gauss_solve
 
 
-    subroutine SEB_glaz(sen_heat, L_in, S_g, &
+    subroutine SEB_glaz(sen_heat, lw_abs, sw_abs, T_in, &
                         emib, emif, lam_g, d_g,&
                         c_gas, rho_gas, mu_gas, lam_gas, d_gas,&
                         Ts_m, Ts)
-        real, intent(in) :: sen_heat, L_in ! sensible heat flux and incoming longwave radiation
-        real, intent(in) :: S_g(:), Ts_m(:), emib(:), emif(:), lam_g(:), d_g(:)
+        real, intent(in) :: sen_heat, lw_abs ! sensible heat flux and absorbed longwave radiation on the outer surface
+        real, intent(in) :: T_in ! room air temperature, also the radiative temperature of the room
+        real, intent(in) :: sw_abs(:) ! absorbed shortwave radiation on each glazing surface (2 per layer)
+        real, intent(in) :: Ts_m(:), emib(:), emif(:), lam_g(:), d_g(:)
         real, intent(in) :: c_gas(:), rho_gas(:), mu_gas(:), lam_gas(:), d_gas(:)
         real, allocatable, intent(out) :: Ts(:)
 
-        integer :: N, i
+        integer :: N, i, iter
+        integer, parameter :: max_iter = 100 ! cap on the fixed-point iterations
         real, parameter :: sig = 5.67e-8
-        real :: T_in, E_in, G_theta, window_h, An, n_exp_gap, h_in, res_max, res
+        real :: E_in, G_theta, window_h, An, n_exp_gap, h_in, res_max, res
         real :: Nu_in, RaH, Tmf, gamEff
         real, allocatable :: k(:), r(:), h_gap(:), Ts_star(:), Ts_old(:), A(:,:), B(:)
 
@@ -183,8 +187,8 @@ contains
         if (size(Ts_m) /= 2 * N) then
             error stop 'Ts_m must have length 2*N.'
         end if
-        if (size(S_g) /= 2 * N) then
-            error stop 'S must have length 2*N.'
+        if (size(sw_abs) /= 2 * N) then
+            error stop 'sw_abs must have length 2*N.'
         end if
         if (size(emib) /= N .or. size(emif) /= N .or. size(lam_g) /= N .or. size(d_g) /= N) then
             error stop 'emib, emif, lam_g, and d_g must have length N.'
@@ -200,7 +204,6 @@ contains
         Ts = Ts_m
         Ts_star = Ts_m
 
-        T_in = 25.0 + 273.15
         E_in = sig * T_in ** 4
         G_theta = 90.0
         window_h = 3.0
@@ -234,8 +237,10 @@ contains
 
         res_max = 0.01
         res = 1.0
+        iter = 0
 
-        do while (res > res_max)
+        do while (res > res_max .and. iter < max_iter)
+            iter = iter + 1
             Ts_old = Ts
 
             call calc_room_hin(Ts(2 * N), T_in, window_h, G_theta, h_in, Nu_in, RaH, Tmf, gamEff)
@@ -249,8 +254,8 @@ contains
             A = 0.0
             B = 0.0
 
-            B(1) = L_in * emif(1) + sen_heat + S_g(1)
-            B(2 * N) = E_in * emib(N) + h_in * T_in + S_g(2 * N)
+            B(1) = lw_abs + sen_heat + sw_abs(1) ! lw_abs already includes the emissivity emif(1) (calclw)
+            B(2 * N) = E_in * emib(N) + h_in * T_in + sw_abs(2 * N)
 
             A(1, 1) = sig * emif(1) * Ts(1) ** 3 + k(1)
             A(1, 2) = -k(1)
@@ -267,8 +272,8 @@ contains
                     A(2 * i + 1, 2 * i + 1) = h_gap(i) + k(i + 1) + r(i) * Ts(2 * i + 1) ** 3
                     A(2 * i + 1, 2 * i + 2) = -k(i + 1)
 
-                    B(2 * i) = S_g(2 * i)
-                    B(2 * i + 1) = S_g(2 * i + 1)
+                    B(2 * i) = sw_abs(2 * i)
+                    B(2 * i + 1) = sw_abs(2 * i + 1)
                 end do
             end if
 
@@ -281,6 +286,10 @@ contains
                 deallocate(h_gap)
             end if
         end do
+
+        if (res > res_max) then
+            write(0, *) 'WARNING: SEB_glaz did not converge in ', max_iter, ' iterations, residual ', res, ' K'
+        end if
     end subroutine SEB_glaz
 
 end module modglazSEB

@@ -27,7 +27,7 @@
    module initfac
       use mpi
       use modglobal, only : ifinput, nfcts, cexpnr, libm, bldT, flrT, rsmin, wsoil, wfc, &
-                            nfaclyrs, lEB, lvfsparse, nnz, lfacTlyrs, lwritefac, lglaz, nglaz, nglazlyrs ! glazing
+                            nfaclyrs, lEB, lvfsparse, nnz, lfacTlyrs, lwritefac, lglaz, nglaz, nglazlyrs, nglaztypes ! glazing
       use modmpi,   only : myid, comm3d, mpierr, MY_REAL, nprocs, cmyid
       use netcdf
       implicit none
@@ -77,22 +77,24 @@
       real, allocatable    :: faccth(:) !sum of all transfer coefficients of the facet, used in Penman Moneith, unused
       real, allocatable    :: facqsat(:) !saturation absoulute humidity at facet temperature   
       ! glazing
-      real, allocatable    :: S_g(:,:) !solar radiation on glazing layers
-      real, allocatable    :: emib(:) !emissivity of the glazing  layers (back)
-      real, allocatable    :: emif(:) !emissivity of the glazing  layers(front)
-      real, allocatable    :: lam_g(:) !thermal conductivity of the glazing layers
-      real, allocatable    :: d_g(:) !thickness of the glazing layers
-      real, allocatable    :: c_gas(:) !specific heat capacity of the gas in the glazing system
-      real, allocatable    :: rho_gas(:) !density of the gas in the glazing system
-      real, allocatable    :: lam_gas(:) !thermal conductivity of the gas in the glazing system
-      real, allocatable    :: d_gas(:) !thickness of the gas layer in the glazing system
-      real, allocatable    :: mu_gas(:) !dynamic viscosity of the gas in the glazing system
+      real, allocatable    :: netsw_glaz(:,:) !net shortwave absorbed on each glazing surface (2 per layer), per glazing facet
+      !glazing properties are stored as (layer, glazing type)
+      real, allocatable    :: emib(:,:) !emissivity of the glazing  layers (back)
+      real, allocatable    :: emif(:,:) !emissivity of the glazing  layers(front)
+      real, allocatable    :: lam_g(:,:) !thermal conductivity of the glazing layers
+      real, allocatable    :: d_g(:,:) !thickness of the glazing layers
+      real, allocatable    :: c_gas(:,:) !specific heat capacity of the gas in the glazing system
+      real, allocatable    :: rho_gas(:,:) !density of the gas in the glazing system
+      real, allocatable    :: lam_gas(:,:) !thermal conductivity of the gas in the glazing system
+      real, allocatable    :: d_gas(:,:) !thickness of the gas layer in the glazing system
+      real, allocatable    :: mu_gas(:,:) !dynamic viscosity of the gas in the glazing system
       real, allocatable    :: Ts_m(:) !surface temperature of the glazing system (prior step)
       real, allocatable    :: Ts(:) !surface temperature of the glazing system (current step)
       integer, allocatable :: locglaz(:) !location of glazing facets
       integer, allocatable :: glazlocidx(:) !map from facet id to glazing row index
-      real :: glaz_z0m,glaz_z0h !glazing roughness lengths for momentum and heat
-      integer :: glaz_id=-200524 !facets with this walltype are considered glazing
+      real, allocatable    :: glaz_z0m(:),glaz_z0h(:) !glazing roughness lengths for momentum and heat, per glazing type
+      integer, allocatable :: glaz_ids(:) !walltype of each glazing type, facets with these walltypes are considered glazing
+      integer, allocatable :: glaztypeloc(:) !array to match the walltype to its glazing type (0 = not glazing), like typeloc
       !misc
       integer, allocatable :: typeloc(:) !array to match the walltype to sequential integers for indexing
       integer              :: nfactypes = 0 !number of different factypes, will be determined automatically
@@ -177,16 +179,19 @@
         end if
 
         if (lglaz) then ! glazing
-           allocate(S_g(1:nglaz,1:nglazlyrs*2)); S_g = 0.
-           allocate(emib(1:nglazlyrs)); emib = 0.
-           allocate(emif(1:nglazlyrs)); emif = 0.
-           allocate(lam_g(1:nglazlyrs)); lam_g = 0.
-           allocate(d_g(1:nglazlyrs)); d_g = 0.
-           allocate(c_gas(1:nglazlyrs-1)); c_gas = 0.
-           allocate(rho_gas(1:nglazlyrs-1)); rho_gas = 0.
-           allocate(lam_gas(1:nglazlyrs-1)); lam_gas = 0.
-           allocate(d_gas(1:nglazlyrs-1)); d_gas = 0.
-           allocate(mu_gas(1:nglazlyrs-1)); mu_gas = 0.
+           allocate(netsw_glaz(1:nglaz,1:nglazlyrs*2)); netsw_glaz = 0.
+           allocate(emib(1:nglazlyrs,1:nglaztypes)); emib = 0.
+           allocate(emif(1:nglazlyrs,1:nglaztypes)); emif = 0.
+           allocate(lam_g(1:nglazlyrs,1:nglaztypes)); lam_g = 0.
+           allocate(d_g(1:nglazlyrs,1:nglaztypes)); d_g = 0.
+           allocate(c_gas(1:nglazlyrs-1,1:nglaztypes)); c_gas = 0.
+           allocate(rho_gas(1:nglazlyrs-1,1:nglaztypes)); rho_gas = 0.
+           allocate(lam_gas(1:nglazlyrs-1,1:nglaztypes)); lam_gas = 0.
+           allocate(d_gas(1:nglazlyrs-1,1:nglaztypes)); d_gas = 0.
+           allocate(mu_gas(1:nglazlyrs-1,1:nglaztypes)); mu_gas = 0.
+           allocate(glaz_z0m(1:nglaztypes)); glaz_z0m = 0.
+           allocate(glaz_z0h(1:nglaztypes)); glaz_z0h = 0.
+           allocate(glaz_ids(1:nglaztypes)); glaz_ids = 0
            allocate(Ts_m(1:nglazlyrs*2)); Ts_m = 0.
            allocate(Ts(1:nglazlyrs*2)); Ts = 0.
            allocate(locglaz(nglaz))
@@ -233,7 +238,7 @@
           if (myid == 0) then
             open (ifinput, file='aknet_glaz.txt')
             do n = 1, nglaz
-                read (ifinput, *) locglaz(n), S_g(n,1:2*nglazlyrs)
+                read (ifinput, *) locglaz(n), netsw_glaz(n,1:2*nglazlyrs)
             end do
             close (ifinput)
 
@@ -244,27 +249,36 @@
             end do
 
             open (ifinput, file='aprop_glaz.txt')
-            read (ifinput, *) glaz_id, emib(:), emif(:), lam_g(:), d_g(:), &
-                              c_gas(:), rho_gas(:), lam_gas(:), d_gas(:), mu_gas(:),&
-                              glaz_z0m, glaz_z0h
+            do k = 1, nglaztypes
+              read (ifinput, *) glaz_ids(k), emib(:,k), emif(:,k), lam_g(:,k), d_g(:,k), &
+                                c_gas(:,k), rho_gas(:,k), lam_gas(:,k), d_gas(:,k), mu_gas(:,k),&
+                                glaz_z0m(k), glaz_z0h(k)
+            end do
             close (ifinput)
           end if
 
           call MPI_BCAST(locglaz, nglaz, MPI_Integer, 0, comm3d, mpierr)
           call MPI_BCAST(glazlocidx, nfcts + 1, MPI_Integer, 0, comm3d, mpierr)
-          call MPI_BCAST(S_g, (nglaz)*(2*nglazlyrs), MY_REAL, 0, comm3d, mpierr)
-          call MPI_BCAST(glaz_id, 1, MPI_Integer, 0, comm3d, mpierr)
-          call MPI_BCAST(emib, nglazlyrs, MY_REAL, 0, comm3d, mpierr)
-          call MPI_BCAST(emif, nglazlyrs, MY_REAL, 0, comm3d, mpierr)
-          call MPI_BCAST(lam_g, nglazlyrs, MY_REAL, 0, comm3d, mpierr)
-          call MPI_BCAST(d_g, nglazlyrs, MY_REAL, 0, comm3d, mpierr)
-          call MPI_BCAST(c_gas, nglazlyrs-1, MY_REAL, 0, comm3d, mpierr)
-          call MPI_BCAST(rho_gas, nglazlyrs-1, MY_REAL, 0, comm3d, mpierr)
-          call MPI_BCAST(lam_gas, nglazlyrs-1, MY_REAL, 0, comm3d, mpierr)
-          call MPI_BCAST(d_gas, nglazlyrs-1, MY_REAL, 0, comm3d, mpierr)
-          call MPI_BCAST(mu_gas, nglazlyrs-1, MY_REAL, 0, comm3d, mpierr)
-          call MPI_BCAST(glaz_z0m, 1, MY_REAL, 0, comm3d, mpierr)
-          call MPI_BCAST(glaz_z0h, 1, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(netsw_glaz, (nglaz)*(2*nglazlyrs), MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(glaz_ids, nglaztypes, MPI_Integer, 0, comm3d, mpierr)
+          call MPI_BCAST(emib, nglazlyrs*nglaztypes, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(emif, nglazlyrs*nglaztypes, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(lam_g, nglazlyrs*nglaztypes, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(d_g, nglazlyrs*nglaztypes, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(c_gas, (nglazlyrs-1)*nglaztypes, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(rho_gas, (nglazlyrs-1)*nglaztypes, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(lam_gas, (nglazlyrs-1)*nglaztypes, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(d_gas, (nglazlyrs-1)*nglaztypes, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(mu_gas, (nglazlyrs-1)*nglaztypes, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(glaz_z0m, nglaztypes, MY_REAL, 0, comm3d, mpierr)
+          call MPI_BCAST(glaz_z0h, nglaztypes, MY_REAL, 0, comm3d, mpierr)
+
+          !map walltypes to glazing types like typeloc, covering all walltypes in factypes and aprop_glaz.txt
+          allocate (glaztypeloc(min(lbound(typeloc, 1), minval(glaz_ids)):max(ubound(typeloc, 1), maxval(glaz_ids))))
+          glaztypeloc = 0
+          do k = 1, nglaztypes
+            glaztypeloc(glaz_ids(k)) = k
+          end do
         end if
 
         if (myid .eq. 0 .and. libm) then
@@ -281,17 +295,19 @@
               close (ifinput)
 
               do n = 1, nfcts
-                if (facets(n) == glaz_id) then
+                k = 0
+                if (lglaz) k = glaztypeloc(facets(n)) !glazing type of the facet, 0 = not glazing
+                if (k > 0) then
                   if (glazlocidx(n) == 0) then ! glazing
                     write(0, *) 'ERROR: glazing facet ', n, ' has no row in aknet_glaz.txt'
                     write(0, *) 'aknet_glaz.txt must list 1-based facet numbers'
                     stop 1
                   end if
                   faclGR(n) = .false. !logic for green surface, conversion from real to logical
-                  facz0(n) = glaz_z0m  !surface momentum roughness
-                  facz0h(n) = glaz_z0h !surface heat & moisture roughness
+                  facz0(n) = glaz_z0m(k)  !surface momentum roughness
+                  facz0h(n) = glaz_z0h(k) !surface heat & moisture roughness
                   !facalb(n) = factypes(i, 5) !surface shortwave albedo
-                  facem(n) = emif(1)  !surface longwave emissivity
+                  facem(n) = emif(1,k)  !surface longwave emissivity
 
                 else                
                   i = typeloc(facets(n))

@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+from udbase import UDBase
 from udprep.udprep_radiation import RadiationSection
 from udprep.udprep_glazing import (
     _trace_rays,
@@ -13,19 +14,81 @@ from udprep.udprep_glazing import (
 )
 import tempfile
 import unittest
+import warnings
 import numpy as np
    
    
 class Property:
     def __init__(self) -> None:
-        self.glaz = SimpleNamespace(
-            id=30,
-            T_0=np.array([0.775, 0.775, 0.775]),
-            Rf_0=np.array([0.071, 0.071, 0.071]),
-            Rb_0=np.array([0.071, 0.071, 0.071]),
-            d_g=np.array([0.006, 0.006, 0.006]),
-            d_gas=np.array([0.01, 0.01]),
+        self.glaz = {
+            30: SimpleNamespace(
+                id=30,
+                name="Clear",
+                T_0=np.array([0.775, 0.775, 0.775]),
+                Rf_0=np.array([0.071, 0.071, 0.071]),
+                Rb_0=np.array([0.071, 0.071, 0.071]),
+                d_g=np.array([0.006, 0.006, 0.006]),
+                d_gas=np.array([0.01, 0.01]),
+            )
+        }
+
+
+def glazing_type(id, name, T_0, Rf_0, Rb_0):
+    """A glazing type with every property _compute_knet writes to aprop_glaz.txt."""
+    nlyrs = len(T_0)
+    return SimpleNamespace(
+        id=id,
+        name=name,
+        T_0=np.asarray(T_0, dtype=float),
+        Rf_0=np.asarray(Rf_0, dtype=float),
+        Rb_0=np.asarray(Rb_0, dtype=float),
+        d_g=np.full(nlyrs, 0.006),
+        emib=np.full(nlyrs, 0.84),
+        emif=np.full(nlyrs, 0.84),
+        lam_g=np.full(nlyrs, 0.9),
+        c_gas=np.full(nlyrs - 1, 1005.0),
+        rho_gas=np.full(nlyrs - 1, 1.225),
+        lam_gas=np.full(nlyrs - 1, 0.0242),
+        d_gas=np.full(nlyrs - 1, 0.01),
+        mu_gas=np.full(nlyrs - 1, 1.8e-5),
+        z0m=1e-4,
+        z0h=1e-6,
+    )
+
+
+def run_compute_knet(glaz, facet_types, nglazlyrs=3, namoptions=None):
+    """
+    Run the file-writing path of _compute_knet on a scene where every facet
+    faces up and no facet sees another, with the direct shortwave stubbed
+    out. nglazlyrs is the value the case had before preprocessing, and
+    namoptions the text of its namoptions.001 file (none if not given).
+    Return the rows of aknet_glaz.txt and aprop_glaz.txt and the namelist
+    parameters it saves.
+    """
+    nfac = len(facet_types)
+    saved = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        if namoptions is not None:
+            (Path(tmp) / "namoptions.001").write_text(namoptions, encoding="ascii")
+        sim = SimpleNamespace(
+            expnr="001",
+            nglazlyrs=nglazlyrs,
+            nfaclyrs=10,
+            path=tmp,
+            glaz=glaz,
+            facs={"typeid": np.asarray(facet_types)},
+            geom=SimpleNamespace(stl=SimpleNamespace(face_normals=np.tile([0.0, 0.0, 1.0], (nfac, 1)))),
+            save_param=lambda name, value: saved.__setitem__(name, value),
         )
+        solver = RadiationSection("radiation", {"lglaz": True}, sim=sim)
+        solver.calc_direct_sw = lambda *args, **kwargs: (np.full(nfac, 300.0), None, None)
+        solver._compute_knet(
+            np.array([0.0, 0.0, 1.0]), 800.0, 100.0, "facsec", None, True,
+            np.full(nfac, 0.2), np.zeros((nfac, nfac)), np.ones(nfac), None,
+        )
+        aknet = np.loadtxt(Path(tmp) / "aknet_glaz.txt", ndmin=2)
+        aprop = np.loadtxt(Path(tmp) / "aprop_glaz.txt", ndmin=2)
+    return aknet, aprop, saved
 
 class TestGlazing(unittest.TestCase): 
     def test_glazing_manually_with_original_MATLABcode(self):
@@ -196,7 +259,7 @@ class TestGlazing(unittest.TestCase):
     def test_facet_classification_ignores_non_glazing_types(self):
         """
         calc_knet_glaz decides which facets are glazing by comparing
-        facet_types against self.glaz.id (udprep_radiation.py's glaz_idx/nglaz),
+        facet_types against the ids in self.glaz (udprep_radiation.py's glaz_idx/nglaz),
         then only those facets get marked specular and given the glazing
         albedo (Rf_sys_dif overwrites albedo[j] for glazing facets only).
         test_glazing_properties only ever uses facet_types=[30, 1, 30], so it
@@ -204,7 +267,7 @@ class TestGlazing(unittest.TestCase):
         left alone, or that non-glazing facets keep whatever albedo the
         caller passed in. Use two different non-glazing types (1 and 7) here
         to check both are treated identically -- i.e. classification really
-        is "matches glaz.id" and not e.g. "not equal to 1".
+        is "matches a glazing id" and not e.g. "not equal to 1".
         """
         svf = np.array([1.0, 1.0, 1.0, 1.0])
         phi = np.deg2rad(np.array([45, 45, 0, 0]))
@@ -216,8 +279,9 @@ class TestGlazing(unittest.TestCase):
         vf = np.zeros((4, 4))
 
         sim = Property()
+        glaz = sim.glaz[30]
         solver = RadiationSection("radiation", {}, sim=sim)
-        nglaz = np.sum(facet_types == sim.glaz.id)
+        nglaz = np.sum(facet_types == glaz.id)
         knet, knet_glaz, albedo_glaz, solar = solver.calc_knet_glaz(
             sdir, dsky, albedo, vf, svf, phi, facet_types
         )
@@ -235,7 +299,7 @@ class TestGlazing(unittest.TestCase):
         # plus the diffuse light returned from the room (room albedo 0.2);
         # non-glazing facets (1, 2) -- regardless of which non-glazing type
         # they are -- must keep the caller's original albedo untouched.
-        T_dif, _, Rb_dif, _ = calc_glazing_TRA_dif(sim.glaz.T_0, sim.glaz.Rf_0, sim.glaz.Rb_0, sim.glaz.d_g)
+        T_dif, _, Rb_dif, _ = calc_glazing_TRA_dif(glaz.T_0, glaz.Rf_0, glaz.Rb_0, glaz.d_g)
         room_return = T_dif * 0.2 / (1 - Rb_dif * 0.2) * T_dif
         np.testing.assert_allclose(albedo[[0, 3]], albedo_glaz[:, 2] + room_return)
         np.testing.assert_array_equal(albedo[[1, 2]], original_albedo[[1, 2]])
@@ -429,13 +493,14 @@ class TestGlazing(unittest.TestCase):
         balance fails if the room-returned light is dropped (the direct or
         the diffuse part) or counted twice. Coated layers make Rf != Rb.
         """
-        sim = SimpleNamespace(glaz=SimpleNamespace(
+        sim = SimpleNamespace(glaz={30: SimpleNamespace(
             id=30,
+            name="LowE",
             T_0=np.array([0.6, 0.775, 0.775]),
             Rf_0=np.array([0.17, 0.071, 0.071]),
             Rb_0=np.array([0.22, 0.071, 0.071]),
             d_g=np.full(3, 0.006),
-        ))
+        )})
         albedo_room = 0.2  # as in calc_knet_glaz
         phi = np.deg2rad(np.array([45.0, 0.0]))
         facet_types = np.array([30, 1])  # glazing, black receiver
@@ -448,7 +513,7 @@ class TestGlazing(unittest.TestCase):
         solver = RadiationSection("radiation", {}, sim=sim)
         knet, knet_glaz, _, _ = solver.calc_knet_glaz(sdir, dsky, albedo, vf, svf, phi, facet_types)
 
-        glaz = sim.glaz
+        glaz = sim.glaz[30]
         T_dir, _, _, _ = calc_glazing_TRA_dir(glaz.T_0, glaz.Rf_0, glaz.Rb_0, glaz.d_g, phi[0])
         T_dif, _, Rb_dif, _ = calc_glazing_TRA_dif(glaz.T_0, glaz.Rf_0, glaz.Rb_0, glaz.d_g)
         K_trans = T_dir * sdir[0] + T_dif * dsky
@@ -466,42 +531,236 @@ class TestGlazing(unittest.TestCase):
         facet in aknet_glaz.txt by that number. calc_knet_glaz returns 0-based
         indices, so _compute_knet must add 1 when it writes the file: a
         0-based index makes every glazing facet miss its row and read
-        S_g(0,:) out of bounds in Fortran. Run the file-writing path of
+        netsw_glaz(0,:) out of bounds in Fortran. Run the file-writing path of
         _compute_knet on a small scene, with the direct shortwave stubbed out,
         and check the first column holds the 1-based facet numbers.
         """
         facet_types = np.array([1, 30, 1, 30, 30, 7])  # glazing at 0-based 1, 3, 4
-        nfac = len(facet_types)
-        saved = {}
-
-        with tempfile.TemporaryDirectory() as tmp:
-            glaz = Property().glaz
-            glaz.emif = np.full(3, 0.84)
-            glaz.emib = np.full(3, 0.84)
-            glaz.lam_g = np.full(3, 0.9)
-            glaz.c_gas = np.full(2, 1005.0)
-            glaz.rho_gas = np.full(2, 1.225)
-            glaz.lam_gas = np.full(2, 0.0242)
-            glaz.mu_gas = np.full(2, 1.8e-5)
-            glaz.z0m = 1e-4
-            glaz.z0h = 1e-6
-            sim = SimpleNamespace(
-                nglazlyrs=3,
-                nfaclyrs=10,
-                path=tmp,
-                glaz=glaz,
-                facs={"typeid": facet_types},
-                geom=SimpleNamespace(stl=SimpleNamespace(face_normals=np.tile([0.0, 0.0, 1.0], (nfac, 1)))),
-                save_param=lambda name, value: saved.__setitem__(name, value),
-            )
-            solver = RadiationSection("radiation", {"lglaz": True}, sim=sim)
-            solver.calc_direct_sw = lambda *args, **kwargs: (np.full(nfac, 300.0), None, None)
-            solver._compute_knet(
-                np.array([0.0, 0.0, 1.0]), 800.0, 100.0, "facsec", None, True,
-                np.full(nfac, 0.2), np.zeros((nfac, nfac)), np.ones(nfac), None,
-            )
-            rows = np.loadtxt(Path(tmp) / "aknet_glaz.txt", ndmin=2)
+        clear = glazing_type(30, "Clear", [0.775] * 3, [0.071] * 3, [0.071] * 3)
+        rows, _, saved = run_compute_knet({30: clear}, facet_types)
 
         np.testing.assert_array_equal(rows[:, 0], [2, 4, 5])
         self.assertEqual(rows.shape[1], 1 + 2 * 3)  # facet number + two surfaces per layer
         self.assertEqual(saved["nglaz"], 3)
+
+    def test_each_glazing_type_uses_its_own_properties(self):
+        """
+        With several glazing types, calc_knet_glaz must give every glazing
+        facet the optical properties of its own type. No facet sees another
+        here, so a glazing facet only depends on its own type, sun and sky:
+        in a scene that mixes two types it must get exactly what it gets when
+        its type is the only glazing type. Facets 0 and 1 have the same sun
+        and incidence angle, so their results differ only through the type.
+        """
+        clear = glazing_type(30, "Clear", [0.775] * 3, [0.071] * 3, [0.071] * 3)
+        lowe = glazing_type(31, "LowE", [0.6, 0.775, 0.775], [0.17, 0.071, 0.071], [0.22, 0.071, 0.071])
+        facet_types = np.array([30, 31, 1, 31, 30])
+        phi = np.deg2rad(np.array([40.0, 40.0, 40.0, 70.0, 10.0]))
+        sdir = 600.0 * np.cos(phi)
+        dsky = 150.0
+        svf = np.ones(5)
+        vf = np.zeros((5, 5))
+
+        def run(glaz):
+            solver = RadiationSection("radiation", {}, sim=SimpleNamespace(glaz=glaz))
+            albedo = np.full(5, 0.3)
+            _, knet_glaz, albedo_glaz, _ = solver.calc_knet_glaz(sdir, dsky, albedo, vf, svf, phi, facet_types)
+            return knet_glaz, albedo_glaz, albedo
+
+        knet_glaz, albedo_glaz, albedo = run({30: clear, 31: lowe})
+        np.testing.assert_array_equal(knet_glaz[:, 0], [0, 1, 3, 4])
+
+        for glaz, rows in ((clear, [0, 3]), (lowe, [1, 2])):  # rows of the facets of this type
+            with self.subTest(glazing=glaz.name):
+                knet_glaz_1, albedo_glaz_1, albedo_1 = run({glaz.id: glaz})
+                facets = knet_glaz[rows, 0].astype(int)
+                np.testing.assert_allclose(knet_glaz[rows], knet_glaz_1, rtol=0, atol=1e-12)
+                np.testing.assert_allclose(albedo_glaz[rows], albedo_glaz_1, rtol=0, atol=1e-12)
+                np.testing.assert_allclose(albedo[facets], albedo_1[facets], rtol=0, atol=1e-12)
+
+        self.assertFalse(np.allclose(knet_glaz[0, 1:], knet_glaz[1, 1:]))
+        self.assertNotAlmostEqual(albedo[0], albedo[1])
+        self.assertEqual(albedo[2], 0.3)  # the non-glazing facet keeps its albedo
+
+    def test_aprop_glaz_has_one_row_per_glazing_type(self):
+        """
+        The solver reads nglaztypes rows from aprop_glaz.txt and finds the
+        properties of a glazing facet by its type id in the first column.
+        Every glazing type must give one row with its own properties in the
+        column order the solver reads (id, emib, emif, lam_g, d_g, c_gas,
+        rho_gas, lam_gas, d_gas, mu_gas, z0m, z0h), and nglaztypes must be
+        saved for the solver. aknet_glaz.txt lists the facets of all types.
+        """
+        clear = glazing_type(30, "Clear", [0.775] * 3, [0.071] * 3, [0.071] * 3)
+        lowe = glazing_type(31, "LowE", [0.6, 0.775, 0.775], [0.17, 0.071, 0.071], [0.22, 0.071, 0.071])
+        lowe.emif = np.array([0.1, 0.84, 0.84])  # low-e coating on the outer face
+        lowe.lam_g = np.array([0.8, 0.9, 1.0])
+        lowe.d_gas = np.array([0.012, 0.016])
+        lowe.mu_gas = np.array([1.7e-5, 2.2e-5])
+        lowe.z0m = 2e-4
+        facet_types = np.array([31, 1, 30, 31])
+        aknet, aprop, saved = run_compute_knet({30: clear, 31: lowe}, facet_types)
+
+        np.testing.assert_array_equal(aknet[:, 0], [1, 3, 4])
+        self.assertEqual(saved["nglaz"], 3)
+        self.assertEqual(saved["nglaztypes"], 2)
+        self.assertEqual(aprop.shape, (2, 1 + 4 * 3 + 5 * 2 + 2))  # 3 layers, 2 gaps
+        for row, glaz in zip(aprop, (clear, lowe)):
+            with self.subTest(glazing=glaz.name):
+                expected = np.concatenate((
+                    [glaz.id], glaz.emib, glaz.emif, glaz.lam_g, glaz.d_g,
+                    glaz.c_gas, glaz.rho_gas, glaz.lam_gas, glaz.d_gas, glaz.mu_gas,
+                    [glaz.z0m, glaz.z0h],
+                ))
+                np.testing.assert_allclose(row, expected, rtol=1e-6)
+
+    def test_glazing_types_must_have_the_same_layers(self):
+        """
+        All glazing types share nglazlyrs: the solver reads 2*nglazlyrs
+        absorbed values per glazing facet, and nglazlyrs values of each layer
+        property (nglazlyrs-1 of each gap property) per glazing type. A type
+        with another number of layers, or a property with the wrong number
+        of values, would shift the columns the solver reads, so
+        _compute_knet must stop with an error that names the glazing type.
+        """
+        clear = glazing_type(30, "Clear", [0.775] * 3, [0.071] * 3, [0.071] * 3)
+        double = glazing_type(31, "Double", [0.775] * 2, [0.071] * 2, [0.071] * 2)
+        with self.assertRaisesRegex(ValueError, r"\[Double\] in material.toml has 2 glazing layers and \[Clear\] has 3"):
+            run_compute_knet({30: clear, 31: double}, np.array([30, 31]))
+
+        clear.mu_gas = np.full(3, 1.8e-5)  # one value per layer instead of per gap
+        with self.assertRaisesRegex(ValueError, r"mu_gas of \[Clear\] in material.toml has 3 values, expected 2"):
+            run_compute_knet({30: clear}, np.array([30]))
+
+        clear = glazing_type(30, "Clear", [0.775] * 3, [0.071] * 3, [0.071] * 3)
+        del clear.z0h
+        with self.assertRaisesRegex(ValueError, r"\[Clear\] in material.toml has no z0h"):
+            run_compute_knet({30: clear}, np.array([30]))
+
+    def test_material_toml_tables_are_glazing_types(self):
+        """
+        Every top-level table of material.toml is one glazing type, named
+        after the table (e.g. [Clear], [LowE]) and linked to the facets by its
+        id, and UDBase keys the types by id. A file with the old single
+        [Glaz] table is one glazing type named Glaz. Two tables with the same
+        id, a table without id, a top-level value that is not a table, or a
+        file without any table are errors.
+        """
+        namoptions = "\n".join([
+            "&DOMAIN", " itot = 4", " jtot = 3", " ktot = 2",
+            " xlen = 40.0", " ylen = 30.0", " zsize = 20.0", "/",
+            "&ENERGYBALANCE", " lglaz = .true.", "/",
+        ]) + "\n"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            (path / "namoptions.001").write_text(namoptions, encoding="ascii")
+
+            def load(toml):
+                (path / "material.toml").write_text(toml, encoding="ascii")
+                return UDBase("1", path, load_geometry=False, suppress_load_warnings=True)
+
+            sim = load("[Clear]\nid = 30\nT_0 = [0.775, 0.775]\n\n[LowE]\nid = 31\nT_0 = [0.6, 0.775]\n")
+            self.assertEqual(list(sim.glaz), [30, 31])
+            self.assertEqual([glaz.name for glaz in sim.glaz.values()], ["Clear", "LowE"])
+            self.assertEqual(sim.glaz[31].T_0, [0.6, 0.775])
+
+            sim = load("[Glaz]\nid = 30\nT_0 = [0.775]\n")
+            self.assertEqual(list(sim.glaz), [30])
+            self.assertEqual(sim.glaz[30].name, "Glaz")
+
+            for toml, message in (
+                ("[Clear]\nid = 30\n\n[LowE]\nid = 30\n", r"\[LowE\] and \[Clear\] have the same id 30"),
+                ("[Clear]\nT_0 = [0.775]\n", r"\[Clear\] has no id"),
+                ("nglazlyrs = 2\n\n[Clear]\nid = 30\n", r"'nglazlyrs' must be a table"),
+                ("", r"defines no glazing type"),
+            ):
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    load(toml)
+
+    def test_glazing_knet_is_shortwave_absorbed_by_its_layers(self):
+        """
+        knet goes to netsw.inp and the solver outputs it as netsw. For glazing
+        facets the solver uses the absorbed shortwave of each glazing surface
+        from aknet_glaz.txt instead, so their knet must be what those surfaces
+        absorb in total: the sum of the facet's row in knet_glaz, direct
+        shortwave included. The reflection loop alone gives a glazing facet
+        only the diffuse shortwave absorbed by its layers and the room behind
+        it. Non-glazing facets keep the net shortwave of the reflection loop.
+        """
+        clear = glazing_type(30, "Clear", [0.775] * 3, [0.071] * 3, [0.071] * 3)
+        lowe = glazing_type(31, "LowE", [0.6, 0.775, 0.775], [0.17, 0.071, 0.071], [0.22, 0.071, 0.071])
+        facet_types = np.array([30, 1, 31, 7, 30])
+        phi = np.deg2rad(np.array([30.0, 50.0, 40.0, 60.0, 70.0]))
+        sdir = 600.0 * np.cos(phi)
+        sdir[2] = 0.0  # a shaded glazing facet
+        dsky = 100.0
+        vf = np.array([  # equal areas, so the view factors are symmetric
+            [0.0, 0.2, 0.1, 0.1, 0.0],
+            [0.2, 0.0, 0.2, 0.1, 0.1],
+            [0.1, 0.2, 0.0, 0.1, 0.1],
+            [0.1, 0.1, 0.1, 0.0, 0.2],
+            [0.0, 0.1, 0.1, 0.2, 0.0],
+        ])
+        svf = 1.0 - vf.sum(axis=1)
+        albedo = np.array([0.3, 0.2, 0.3, 0.4, 0.3])
+
+        solver = RadiationSection("radiation", {}, sim=SimpleNamespace(glaz={30: clear, 31: lowe}))
+        loop = {}
+        reflections = solver.calc_reflections_sw_glaz
+
+        def keep_loop_knet(*args, **kwargs):
+            loop["knet"], kin = reflections(*args, **kwargs)
+            return loop["knet"].copy(), kin
+
+        solver.calc_reflections_sw_glaz = keep_loop_knet
+        knet, knet_glaz, _, _ = solver.calc_knet_glaz(sdir, dsky, albedo, vf, svf, phi, facet_types)
+
+        glazing = knet_glaz[:, 0].astype(int)
+        np.testing.assert_array_equal(glazing, [0, 2, 4])
+        np.testing.assert_allclose(knet[glazing], knet_glaz[:, 1:].sum(axis=1), rtol=1e-12)
+        others = np.setdiff1d(np.arange(len(facet_types)), glazing)
+        np.testing.assert_array_equal(knet[others], loop["knet"][others])
+
+    def test_glazing_requires_surface_energy_balance(self):
+        """
+        Glazing is solved in the surface energy balance. Without lEB the
+        shortwave step neither computes reflections nor the glazing, and the
+        albedo of a glazing type missing from factypes is NaN and would end up
+        in netsw. _compute_knet must stop before any of that.
+        """
+        clear = glazing_type(30, "Clear", [0.775] * 3, [0.071] * 3, [0.071] * 3)
+        solver = RadiationSection("radiation", {"lglaz": True}, sim=SimpleNamespace(glaz={30: clear}))
+        with self.assertRaisesRegex(ValueError, r"lglaz = \.true\. requires lEB = \.true\."):
+            solver._compute_knet(
+                np.array([0.0, 0.0, 1.0]), 800.0, 100.0, "facsec", None, False,
+                np.full(2, 0.2), None, None, np.ones(2),
+            )
+
+    def test_nglazlyrs_is_written_from_material_toml(self):
+        """
+        The number of glazing layers comes from material.toml, so preprocessing
+        writes nglazlyrs to the namoptions file for the solver, like nglaz and
+        nglaztypes. When the namoptions file sets a different value by hand,
+        that value is replaced with a warning; when it does not set nglazlyrs
+        at all (the default 1 applies), it is written without a warning.
+        """
+        double = glazing_type(30, "Double", [0.775] * 2, [0.071] * 2, [0.071] * 2)
+
+        with self.assertWarnsRegex(UserWarning, r"nglazlyrs = 3 in the namoptions file is replaced by 2"):
+            aknet, aprop, saved = run_compute_knet(
+                {30: double}, np.array([30, 1]), nglazlyrs=3,
+                namoptions="&ENERGYBALANCE\n lglaz = .true.\n nglazlyrs = 3\n/\n",
+            )
+        self.assertEqual(saved["nglazlyrs"], 2)
+        self.assertEqual(aknet.shape[1], 1 + 2 * 2)  # facet number + two surfaces per layer
+        self.assertEqual(aprop.shape[1], 1 + 4 * 2 + 5 * 1 + 2)  # 2 layers, 1 gap
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _, _, saved = run_compute_knet(
+                {30: double}, np.array([30, 1]), nglazlyrs=1,
+                namoptions="&ENERGYBALANCE\n lglaz = .true.\n/\n",
+            )
+        self.assertEqual(saved["nglazlyrs"], 2)
+        self.assertEqual([str(w.message) for w in caught if "nglazlyrs" in str(w.message)], [])

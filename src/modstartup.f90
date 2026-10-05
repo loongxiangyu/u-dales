@@ -69,7 +69,7 @@ module modstartup
                                     lzerogradtopscal, lbuoyancy, ltempeq, &
                                     lfixinlet, lfixutauin, pi, &
                                     thlsrc, ifixuinf, lvinf, tscale, ltempinout, lmoistinout,  &
-                                    lwallfunc,lprofforc,lchem,k1,JNO2,rv,rd,tnextEB,tEB,dtEB,bldT,flrT, lperiodicEBcorr, fraction,sinkbase,wsoil,wgrmax,wwilt,wfc,skyLW,GRLAI,rsmin,nfcts,lEB,lwriteEBfiles,nfaclyrs,lconstW,lvfsparse,nnz,lfacTlyrs,nglaz,lglaz,nglazlyrs, &
+                                    lwallfunc,lprofforc,lchem,k1,JNO2,rv,rd,tnextEB,tEB,dtEB,bldT,flrT, lperiodicEBcorr, fraction,sinkbase,wsoil,wgrmax,wwilt,wfc,skyLW,GRLAI,rsmin,nfcts,lEB,lwriteEBfiles,nfaclyrs,lconstW,lvfsparse,nnz,lfacTlyrs,nglaz,lglaz,nglazlyrs,nglaztypes, &
                                     BCxm,BCxT,BCxq,BCxs,BCym,BCyT,BCyq,BCys,BCzp,ds, &
                                     BCtopm,BCtopT,BCtopq,BCtops,BCbotm,BCbotT,BCbotq,BCbots, &
                                     BCxm_periodic, BCym_periodic, &
@@ -156,7 +156,7 @@ module modstartup
          prandtlturb, fkar, lwritefac, dtfac, nglaz ! glazing
       namelist/ENERGYBALANCE/ &
          lEB, lwriteEBfiles, lperiodicEBcorr, sinkbase, lconstW, dtEB, bldT, flrT, wsoil, wgrmax, wwilt, wfc, &
-         skyLW, GRLAI, rsmin, nfaclyrs, lfacTlyrs, lvfsparse, nnz, fraction, lglaz, nglazlyrs ! glazing
+         skyLW, GRLAI, rsmin, nfaclyrs, lfacTlyrs, lvfsparse, nnz, fraction, lglaz, nglazlyrs, nglaztypes ! glazing
       namelist/SCALARS/ &
          lreadscal, lscasrc, lscasrcl, lscasrcr, &
          nsv, nscasrc, nscasrcl !!xS, yS, zS, SS, sigS
@@ -576,6 +576,7 @@ module modstartup
       call MPI_BCAST(nglaz, 1, MPI_INTEGER, 0, comm3d, mpierr)
       call MPI_BCAST(lglaz, 1, MPI_LOGICAL, 0, comm3d, mpierr)
       call MPI_BCAST(nglazlyrs, 1, MPI_INTEGER, 0, comm3d, mpierr)
+      call MPI_BCAST(nglaztypes, 1, MPI_INTEGER, 0, comm3d, mpierr)
       call MPI_BCAST(irandom, 1, MPI_INTEGER, 0, comm3d, mpierr)
       call MPI_BCAST(krand, 1, MPI_INTEGER, 0, comm3d, mpierr)
       call MPI_BCAST(randthl, 1, MY_REAL, 0, comm3d, mpierr)
@@ -727,7 +728,7 @@ module modstartup
                               iinletgen,linoutflow,ltempeq,iwalltemp,iwallmom,&
                               ipoiss,POISS_FFT2D,POISS_FFT3D,POISS_CYC,&
                               lydump,lytdump,luoutflowr,lvoutflowr,&
-                              lhdriver,lqdriver,lsdriver,ltrees,lEB,itree_mode,&
+                              lhdriver,lqdriver,lsdriver,ltrees,lEB,itree_mode,lglaz,nfaclyrs,nglazlyrs,&
                               TREE_MODE_DRAG_ONLY,TREE_MODE_SVEG,TREE_MODE_LEGACY_SEB
       use modmpi,      only : myid, comm3d, mpierr, nprocx, nprocy
       use modglobal,   only : idriver
@@ -811,6 +812,23 @@ module modstartup
          if ((itree_mode == TREE_MODE_LEGACY_SEB) .and. lEB) then
             if (myid == 0) then
                write(0, *) 'ERROR: legacy tree SEB (itree_mode=99) cannot be combined with lEB=.true.'
+            end if
+            stop 1
+         end if
+      end if
+
+      if (lglaz) then ! glazing
+         if (.not. lEB) then
+            if (myid == 0) then
+               write(0, *) 'ERROR: lglaz=.true. requires lEB=.true.: glazing is solved in the surface energy balance.'
+            end if
+            stop 1
+         end if
+
+         if (nfaclyrs < 2*nglazlyrs) then
+            if (myid == 0) then
+               write(0, *) 'ERROR: when glazing is enabled, nfaclyrs must be at least twice nglazlyrs.'
+               write(0, *) 'nfaclyrs and nglazlyrs are: ', nfaclyrs, nglazlyrs
             end if
             stop 1
          end if

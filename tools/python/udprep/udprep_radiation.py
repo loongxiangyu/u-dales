@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple
 
 from pathlib import Path
+import re
+import warnings
 
 import numpy as np
 from .udprep_glazing import calc_glazing_A_dif_int, calc_glazing_TRA_dir, calc_glazing_TRA_dif # glazing
@@ -919,9 +921,10 @@ class RadiationSection(Section):
         """
         Compute net shortwave on all facets and absorbed shortwave in each glazing layer.
 
-        Glazing facets (facet type ``glaz.id``) reflect direct shortwave specularly
-        with the front reflectance of the glazing system at their incidence angle,
-        and diffuse shortwave with its diffuse front reflectance. Shortwave
+        Glazing facets (facets whose type id is a key of ``glaz``, which holds
+        one glazing type per table of material.toml) reflect direct shortwave
+        specularly with the front reflectance of their glazing system at their
+        incidence angle, and diffuse shortwave with its diffuse front reflectance. Shortwave
         transmitted into the room is reflected diffusely by the room (albedo
         0.2), back and forth between room and glazing; the part that passes
         back through the glazing leaves the facet as diffuse shortwave.
@@ -949,7 +952,9 @@ class RadiationSection(Section):
         Returns
         -------
         knet : np.ndarray
-            Net shortwave per facet [W/m^2]; not used for glazing facets.
+            Net shortwave per facet [W/m^2]. For glazing facets it is the
+            shortwave absorbed by all glazing layers (the sum of the facet's row
+            in knet_glaz); the solver uses knet_glaz for them and only outputs knet.
         knet_glaz : np.ndarray
             Per glazing facet: [0-based facet index, absorbed shortwave on each
             glazing surface (two per layer)] [W/m^2]. The index is written
@@ -962,13 +967,8 @@ class RadiationSection(Section):
             reflected shortwave] [W/m^2] (debug).
         """
         albedo_room = 0.2  # albedo of room surfaces (default 0.2)
-        T_0 = self.glaz.T_0 # normal-incidence transmittance for each glazing layer [-]
-        Rf_0 = self.glaz.Rf_0 # normal-incidence front reflectance for each glazing layer [-]
-        Rb_0 = self.glaz.Rb_0 # normal-incidence back reflectance for each glazing layer [-]
-        d_g = self.glaz.d_g # thickness of each glazing layer [m]
-        glaz_id = self.glaz.id
-        nglaz = np.count_nonzero(facet_types == glaz_id) # number of glazing facets
-        glaz_idx = np.where(facet_types == glaz_id)[0] # indices of glazing facets within all facets
+        glaz_idx = np.where(np.isin(facet_types, list(self.glaz)))[0] # indices of glazing facets within all facets
+        nglaz = len(glaz_idx) # number of glazing facets
 
         albedo_glaz = [] # for debugging, direct and diffuse reflectance of each glazing surface
         knet_glaz = [] # absorbed shortwave radiation (heat source in SEB equation) of each glazing surface
@@ -978,24 +978,32 @@ class RadiationSection(Section):
         albedo_room_dir = np.zeros(albedo.shape) # fraction of direct radiation that enters the room and returns to the exterior as diffuse radiation [-]
         T_sys_dir = np.zeros(nglaz)  # transmittance at an incident angle for the entire system [-]
         Rf_sys_dir = np.zeros(nglaz) # front reflectance at an incident angle for the entire system [-]
-        A_sys_lyrs_dir = np.zeros((nglaz, len(T_0))) # absorptance for each glazing layer in the glazing system [-]
-        A_sys_lyrs_dif_ext = np.zeros(len(T_0)) # diffuse absorptance for each glazing layer, light incident from the exterior [-]
-        A_sys_lyrs_dif_int = np.zeros(len(T_0)) # diffuse absorptance for each glazing layer, light incident from the interior [-]
+        A_sys_lyrs_dir = [] # absorptance for each glazing layer in the glazing system, per glazing facet [-]
 
-        # diffuse transmittance, front reflectance (seen from the exterior) and
-        # back reflectance (seen from the interior) for the entire system [-]
-        (
-            T_sys_dif, Rf_sys_dif, Rb_sys_dif, A_sys_lyrs_dif_ext[:]
-        ) = calc_glazing_TRA_dif(T_0, Rf_0, Rb_0, d_g)
-
-        # light incident from the interior: T and R are T_sys_dif and Rb_sys_dif, only A differs
-        A_sys_lyrs_dif_int[:] = calc_glazing_A_dif_int(T_0, Rf_0, Rb_0, d_g)
+        # diffuse properties of each glazing type, keyed by its id: transmittance,
+        # front reflectance (seen from the exterior) and back reflectance (seen from
+        # the interior) for the entire system, and absorptance for each glazing layer
+        # for light incident from the exterior and from the interior [-]
+        dif = {}
+        for glaz_id, glaz in self.glaz.items():
+            T_sys_dif, Rf_sys_dif, Rb_sys_dif, A_sys_lyrs_dif_ext = calc_glazing_TRA_dif(
+                glaz.T_0, glaz.Rf_0, glaz.Rb_0, glaz.d_g
+            )
+            # light incident from the interior: T and R are T_sys_dif and Rb_sys_dif, only A differs
+            A_sys_lyrs_dif_int = calc_glazing_A_dif_int(glaz.T_0, glaz.Rf_0, glaz.Rb_0, glaz.d_g)
+            dif[glaz_id] = (
+                T_sys_dif, Rf_sys_dif, Rb_sys_dif,
+                np.atleast_1d(A_sys_lyrs_dif_ext), np.atleast_1d(A_sys_lyrs_dif_int),
+            )
 
         # calculate the overall optical properties of the glazing system
         for i, j in enumerate(glaz_idx): # i is the glazing-facet counter, j is its index in all facets
-            (
-                T_sys_dir[i], Rf_sys_dir[i], _, A_sys_lyrs_dir[i, :]
-            ) = calc_glazing_TRA_dir(T_0, Rf_0, Rb_0, d_g, phi[j])
+            glaz = self.glaz[facet_types[j]] # glazing type of this facet
+            T_sys_dif, Rf_sys_dif, Rb_sys_dif, _, _ = dif[facet_types[j]]
+            T_sys_dir[i], Rf_sys_dir[i], _, A_dir = calc_glazing_TRA_dir(
+                glaz.T_0, glaz.Rf_0, glaz.Rb_0, glaz.d_g, phi[j]
+            )
+            A_sys_lyrs_dir.append(np.atleast_1d(A_dir))
 
             # light entering the room returns to the glazing albedo_room / (1 - Rb_sys_dif * albedo_room)
             # times (room-glazing multiple reflections), and T_sys_dif of that passes back out as diffuse light
@@ -1012,6 +1020,8 @@ class RadiationSection(Section):
 
         # calculate the absorbed shortwave radiation for each glazing layer in the glazing system
         for i, j in enumerate(glaz_idx):
+            T_sys_dif, _, Rb_sys_dif, A_sys_lyrs_dif_ext, A_sys_lyrs_dif_int = dif[facet_types[j]]
+
             # shortwave radiation transmitted through the glazing system
             K_trans = T_sys_dir[i] * sdir[j] + T_sys_dif * (kin[j] - sdir[j])
 
@@ -1020,10 +1030,11 @@ class RadiationSection(Section):
 
             # shortwave radiation absorbed by each glazing layer
             K_absorbed_lyrs = (
-                A_sys_lyrs_dir[i, :] * sdir[j]
+                A_sys_lyrs_dir[i] * sdir[j]
                 + A_sys_lyrs_dif_ext * (kin[j] - sdir[j])
                 + K_room * A_sys_lyrs_dif_int
             )
+            knet[j] = np.sum(K_absorbed_lyrs) # net shortwave of a glazing facet: absorbed by all its layers
 
             # absorbed shortwave radiation of each glazing surface (half of its layer)
             K_absorbed_surf = np.repeat(K_absorbed_lyrs / 2, 2)
@@ -1050,6 +1061,8 @@ class RadiationSection(Section):
         svf: np.ndarray | None,
         fss: np.ndarray | None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+        if self.lglaz and not lscatter:
+            raise ValueError("lglaz = .true. requires lEB = .true.: glazing is solved in the surface energy balance.")
         sdir, s_veg, _ = self.calc_direct_sw(
             nsun,
             irradiance,
@@ -1066,19 +1079,52 @@ class RadiationSection(Section):
 
             if self.lglaz:
                 sim = self._require_sim()
-                if len(self.glaz.T_0) != sim.nglazlyrs:
-                    raise ValueError(
-                        f"The number of glazing layers in material.toml ({len(self.glaz.T_0)}) "
-                        f"does not match nglazlyrs ({sim.nglazlyrs}) in the namoptions file."
-                    )
-                if sim.nfaclyrs < 2*sim.nglazlyrs:
+                # number of glazing layers: taken from material.toml, the same for every glazing type
+                glazs = list(self.glaz.values())
+                for glaz in glazs:
+                    if not hasattr(glaz, "T_0"):
+                        raise ValueError(f"[{glaz.name}] in material.toml has no T_0.")
+                nlyrs = int(np.size(glazs[0].T_0))
+                for glaz in glazs[1:]:
+                    if np.size(glaz.T_0) != nlyrs:
+                        raise ValueError(
+                            f"[{glaz.name}] in material.toml has {np.size(glaz.T_0)} glazing layers and "
+                            f"[{glazs[0].name}] has {nlyrs}: all glazing types must have the same number of layers."
+                        )
+                # number of values of each glazing property in material.toml
+                nvals = {key: nlyrs for key in ("T_0", "Rf_0", "Rb_0", "d_g", "emib", "emif", "lam_g")}
+                nvals.update({key: nlyrs - 1 for key in ("c_gas", "rho_gas", "lam_gas", "d_gas", "mu_gas")})
+                nvals.update({"z0m": 1, "z0h": 1})
+                for glaz in glazs:
+                    for key, n in nvals.items():
+                        if not hasattr(glaz, key):
+                            raise ValueError(f"[{glaz.name}] in material.toml has no {key}.")
+                        if np.size(getattr(glaz, key)) != n:
+                            raise ValueError(
+                                f"{key} of [{glaz.name}] in material.toml has {np.size(getattr(glaz, key))} "
+                                f"values, expected {n} for {nlyrs} glazing layers."
+                            )
+                if sim.nfaclyrs < 2*nlyrs:
                     raise ValueError(
                         f"When glazing is enabled, the number of facet layers ({sim.nfaclyrs}) "
-                        f"must be at least twice the number of glazing layers ({sim.nglazlyrs})."
+                        f"must be at least twice the number of glazing layers ({nlyrs})."
                     )
                 expnr = getattr(sim, "expnr", "")
                 out_dir = Path(sim.path) if getattr(sim, "path", None) is not None else Path.cwd()
                 out_dir.mkdir(parents=True, exist_ok=True)
+                # the solver reads nglazlyrs from the namoptions file: write it there, and warn
+                # when that file sets a different value by hand
+                if getattr(sim, "nglazlyrs", nlyrs) != nlyrs:
+                    namoptions_path = out_dir / f"namoptions.{expnr}"
+                    if namoptions_path.is_file() and re.search(
+                        r"^\s*nglazlyrs\s*=", namoptions_path.read_text(encoding="ascii", errors="ignore"),
+                        re.IGNORECASE | re.MULTILINE,
+                    ):
+                        warnings.warn(
+                            f"nglazlyrs = {sim.nglazlyrs} in the namoptions file is replaced by {nlyrs}, "
+                            f"the number of glazing layers in material.toml."
+                        )
+                sim.save_param("nglazlyrs", nlyrs)
                 nsun_unit = nsun / np.linalg.norm(nsun) 
                 cos_inc_all = np.dot(sim.geom.stl.face_normals, nsun_unit)
                 cos_inc_all = np.where(cos_inc_all > 0.0, cos_inc_all, 0.0)
@@ -1086,56 +1132,47 @@ class RadiationSection(Section):
                 facet_types = self.facs["typeid"]
                 (
                     knet, knet_glaz, albedo_glaz, solar
-                ) = self.calc_knet_glaz(sdir,dsky, albedo,vf, svf, phi, facet_types 
+                ) = self.calc_knet_glaz(sdir,dsky, albedo,vf, svf, phi, facet_types
                 )
-                emib=self.glaz.emib # back emissivity for each glazing layer [-]
-                emif=self.glaz.emif # front emissivity for each glazing layer [-]
-                lam_g= self.glaz.lam_g # conductivity of glazing [W/mK]
-                d_g = self.glaz.d_g # thickness of each glazing layer [m]
-                c_gas = self.glaz.c_gas # specific heat capacity of gas [J/kgK]
-                rho_gas = self.glaz.rho_gas # density of gas [kg/m^3]
-                lam_gas = self.glaz.lam_gas # conductivity of gas [W/mK]
-                d_gas = self.glaz.d_gas # thickness of each gas layer [m]
-                mu_gas = self.glaz.mu_gas # dynamic viscosity of gas [kg/ms]
-                
-                # output glazing properties and absorbed shortwave radiation will be used in SEB calculation          
+
+                # output glazing properties and absorbed shortwave radiation will be used in SEB calculation
                 knet_glaz_path = out_dir / "aknet_glaz.txt"
-                knet_glaz_fmt = ["%d"] + ["%8.4f"] * len(self.glaz.T_0)*2
+                knet_glaz_fmt = ["%d"] + ["%8.4f"] * nlyrs*2
                 knet_glaz_out = np.asarray(knet_glaz, dtype=float).reshape(-1, len(knet_glaz_fmt))
                 knet_glaz_out[:, 0] += 1 # convert to 1-based facet numbers for Fortran
                 np.savetxt(knet_glaz_path, knet_glaz_out, fmt=knet_glaz_fmt)
                 prop_glaz_path= out_dir / "aprop_glaz.txt"
                 prop_glaz_fmt = (
                     ["%d"]
-                    + ["%8.6f"] * (
-                        len(self.glaz.T_0) * 4
-                        + (len(self.glaz.T_0) - 1) * 4
-                    )
-                    + ["%10.4e"] * (
-                        2 + (len(self.glaz.T_0) - 1)
-                    )
+                    + ["%8.6f"] * (nlyrs * 4 + (nlyrs - 1) * 4)
+                    + ["%10.4e"] * (2 + (nlyrs - 1))
                 )
-                prop_glaz = np.concatenate((
-                    np.atleast_1d(self.glaz.id),
-                    emib,
-                    emif,
-                    lam_g,
-                    d_g,
-                    c_gas,
-                    rho_gas,
-                    lam_gas,
-                    d_gas,
-                    mu_gas,
-                    np.atleast_1d(self.glaz.z0m),
-                    np.atleast_1d(self.glaz.z0h),
-                ))
-                np.savetxt(prop_glaz_path, prop_glaz[None, :], fmt=prop_glaz_fmt)
+                # one row per glazing type; the solver finds the row of a facet by its type id
+                prop_glaz = np.array([
+                    np.concatenate([np.atleast_1d(prop) for prop in (
+                        glaz.id,
+                        glaz.emib, # back emissivity for each glazing layer [-]
+                        glaz.emif, # front emissivity for each glazing layer [-]
+                        glaz.lam_g, # conductivity of glazing [W/mK]
+                        glaz.d_g, # thickness of each glazing layer [m]
+                        glaz.c_gas, # specific heat capacity of gas [J/kgK]
+                        glaz.rho_gas, # density of gas [kg/m^3]
+                        glaz.lam_gas, # conductivity of gas [W/mK]
+                        glaz.d_gas, # thickness of each gas layer [m]
+                        glaz.mu_gas, # dynamic viscosity of gas [kg/ms]
+                        glaz.z0m, # roughness length for momentum [m]
+                        glaz.z0h, # roughness length for heat [m]
+                    )])
+                    for glaz in self.glaz.values()
+                ])
+                np.savetxt(prop_glaz_path, prop_glaz, fmt=prop_glaz_fmt)
                 # for test and debug
                 # albedo_glaz_path = out_dir / "al_glaz.txt"
                 # np.savetxt(albedo_glaz_path, np.asarray(albedo_glaz), fmt=["%d", "%8.4f", "%8.4f"])
                 # solar_path = out_dir / "asolar.txt"
                 # np.savetxt(solar_path, np.asarray(solar), fmt=["%d", "%8.4f", "%8.4f"])
                 sim.save_param("nglaz", int(len(knet_glaz)))
+                sim.save_param("nglaztypes", len(self.glaz))
             else:
                 knet = self.calc_reflections_sw(sdir, dsky, vf, svf, albedo)
             

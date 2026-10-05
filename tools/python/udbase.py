@@ -452,14 +452,29 @@ class UDBase:
         self._lffactypes = True
         self._lffacet_sections = True
         
-        # glazing system
+        # glazing system: every top-level table in material.toml is one glazing
+        # type, e.g. [Clear] or [LowE], linked to the facets by its id
         if getattr(self, 'lglaz', False):  # glazing
             material_path = self.path / "material.toml"
             if not material_path.is_file():
                 raise FileNotFoundError(f"material.toml not found: {material_path}")
             with material_path.open("rb") as f:
-                glaz = tomllib.load(f)
-            self.glaz=Glazing(glaz["Glaz"])
+                materials = tomllib.load(f)
+            self.glaz = {}  # glazing types keyed by facet type id
+            for name, props in materials.items():
+                if not isinstance(props, dict):
+                    raise ValueError(f"material.toml: '{name}' must be a table like [{name}]")
+                if "id" not in props:
+                    raise ValueError(f"material.toml: [{name}] has no id")
+                glaz = Glazing(props)
+                glaz.name = name
+                if glaz.id in self.glaz:
+                    raise ValueError(
+                        f"material.toml: [{name}] and [{self.glaz[glaz.id].name}] have the same id {glaz.id}"
+                    )
+                self.glaz[glaz.id] = glaz
+            if not self.glaz:
+                raise ValueError(f"material.toml defines no glazing type: {material_path}")
         
         # Load facet areas
         facetarea_file = self.path / f"facetarea.inp.{self.expnr}"

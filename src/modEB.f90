@@ -420,13 +420,13 @@ contains
     !calculates the energy balance for every facet
     use modglobal, only: nfcts, boltz, tEB, AM, BM,CM,DM,EM,FM,GM,HM, inAM, bb,w, dumv,Tdash, timee, dtEB, tnextEB, rk3step, rhoa, cp, lEB, ntrun, lwriteEBfiles,nfaclyrs
     use initfac, only: faclam, faccp, netsw, facem, fachf, facef, fachfi, facT, facLWin, faca,facefi,facf,facets,facTdash,facqsat,facwsoil,facf,fachurel,facd,fackappa,&
-                       S_g,emif,emib,lam_g,d_g,c_gas,rho_gas,lam_gas,d_gas,mu_gas,glazlocidx,glaz_id,Ts_m,Ts ! glazing
+                       netsw_glaz,emif,emib,lam_g,d_g,c_gas,rho_gas,lam_gas,d_gas,mu_gas,glazlocidx,glaztypeloc,Ts_m,Ts ! glazing
     use modmpi, only: myid, comm3d, mpierr, MY_REAL, nprocs, cmyid
     use modstat_nc, only : writestat_nc, writestat_1D_nc, writestat_2D_nc
     use modglazSEB ! glazing
     real  :: ca = 0., cb = 0., cc = 0., cd = 0., ce = 0., cf = 0.
     real  :: ab = 0.
-    integer :: l, n, m,i,j
+    integer :: l, n, m,i,j,k
     character(19) name
 
     if (.not. (lEB)) return
@@ -463,17 +463,25 @@ contains
 
         do n = 1, nfcts
           if (facets(n) < -100) cycle
-          if (facets(n) == glaz_id) then
+          k = 0
+          if (lglaz) k = glaztypeloc(facets(n)) !glazing type of the facet, 0 = not glazing
+          if (k > 0) then
             Ts_m = facT(n,1:size(Ts))
             Ts = facT(n,1:size(Ts))
-             call SEB_glaz(fachfi(n), facLWin(n), S_g(glazlocidx(n),:), &
-                            emib, emif, lam_g, d_g,&
-                            c_gas, rho_gas, mu_gas, lam_gas, d_gas,&
+             call SEB_glaz(fachfi(n), facLWin(n), netsw_glaz(glazlocidx(n),:), bldT, &
+                            emib(:,k), emif(:,k), lam_g(:,k), d_g(:,k),&
+                            c_gas(:,k), rho_gas(:,k), mu_gas(:,k), lam_gas(:,k), d_gas(:,k),&
                             Ts_m, Ts)
+              ! glazing facT: surface temperatures from the outer to the room-facing surface (2 per pane), padded with the last one
               facT(n,1:size(Ts)) = Ts
               if (size(facT,2) > size(Ts)) then
                   facT(n,size(Ts)+1:size(facT,2)) = Ts(size(Ts))
-              endif             
+              endif
+              ! temperature gradient inside each pane, the same on both of its surfaces (no material in the gaps)
+              do j = 1, size(Ts)/2
+                facTdash(n, 2*j-1:2*j) = (Ts(2*j) - Ts(2*j-1)) / d_g(j,k)
+              end do
+              facTdash(n, size(Ts)+1:) = facTdash(n, size(Ts))
           else
             !calculate wallflux and update surface temperature
             !! define time dependent fluxes

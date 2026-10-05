@@ -358,6 +358,7 @@ module modglobal
    ! glazing
    integer :: nglaz = -1 ! no. of glazing facets 
    integer :: nglazlyrs = 1 ! no. of glazing layers
+   integer :: nglaztypes = 1 ! no. of glazing types (rows in aprop_glaz.txt)
    logical :: lglaz = .false. ! switch that determines whether glazing is used
    
    !trees
