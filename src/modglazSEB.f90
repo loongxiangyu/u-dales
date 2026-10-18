@@ -22,7 +22,7 @@ contains
         cp = 1005.0
 
         Tmf = T_in + 0.25 * (Ts_in - T_in)
-        lam = 2.873e-3 + 7.76e-8 * Tmf
+        lam = 2.873e-3 + 7.76e-5 * Tmf
         mu = 3.723e-6 + 4.94e-8 * Tmf
 
         gamEff = gamDeg
