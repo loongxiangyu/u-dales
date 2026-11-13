@@ -206,7 +206,7 @@ contains
 
         E_in = sig * T_in ** 4
         G_theta = 90.0
-        window_h = 3.0
+        window_h = 4.0
 
         k = lam_g / d_g
 
@@ -255,27 +255,28 @@ contains
             B = 0.0
 
             B(1) = lw_abs + sen_heat + sw_abs(1) ! lw_abs already includes the emissivity emif(1) (calclw)
-            ! Room-facing surface (row 2N), original BC: surface energy balance with absorbed indoor longwave
-            ! (E_in), indoor convection h_in*(T_in - Ts(2N)) and absorbed shortwave sw_abs(2N).
-            ! Kept for reverting (together with the original A(2N,:) below):
-            ! B(2 * N) = E_in * emib(N) + h_in * T_in + sw_abs(2 * N)
+            ! Room-facing surface (row 2N), current BC: surface energy balance with absorbed indoor longwave
+            ! (E_in), indoor convection h_in*(T_in - Ts(2N)) and absorbed shortwave sw_abs(2N); the indoor
+            ! (air and radiant) temperature T_in = bldT is fixed, the surface temperature Ts(2N) is solved for.
+            B(2 * N) = E_in * emib(N) + h_in * T_in + sw_abs(2 * N)
 
-            ! Room-facing surface (row 2N), current BC: Dirichlet, Ts(2N) = T_in (the limit h_in -> infinity).
+            ! Alternative BC for row 2N (switched off): Dirichlet, Ts(2N) = T_in (the limit h_in -> infinity).
             ! Consistent with opaque facets, whose innermost layer is held at bldT (initfac.f90, modEB.f90).
-            ! E_in, h_in and sw_abs(2N) drop out of the system (sw_abs(2N) effectively goes into the room);
-            ! E_in and calc_room_hin are still evaluated so that the original BC can be restored easily.
-            B(2 * N) = T_in
+            ! E_in, h_in and sw_abs(2N) then drop out of the system (sw_abs(2N) effectively goes into the room).
+            ! To use it, swap the active/commented lines here, in A(2N,:) below and after the under-relaxation.
+            ! B(2 * N) = T_in
 
             A(1, 1) = sig * emif(1) * Ts(1) ** 3 + k(1)
             A(1, 2) = -k(1)
-            ! Original BC for row 2N (energy balance, see B(2N) above):
-            ! A(2 * N, 2 * N - 1) = -k(N)
-            ! A(2 * N, 2 * N) = sig * emib(N) * Ts(2 * N) ** 3 + k(N) + h_in
+            ! Current BC for row 2N (energy balance, see B(2N) above): conduction from the last pane, linearised
+            ! longwave emission and indoor convection h_in*Ts(2N) on the left-hand side.
+            A(2 * N, 2 * N - 1) = -k(N)
+            A(2 * N, 2 * N) = sig * emib(N) * Ts(2 * N) ** 3 + k(N) + h_in
 
-            ! Current BC for row 2N (Dirichlet): 1 * Ts(2N) = T_in. The last pane still sees T_in through
-            ! conduction in row 2N-1 (A(2N-1,2N) = -k(N)); the heat flux into the room is k(N)*(Ts(2N-1) - T_in).
-            A(2 * N, 2 * N - 1) = 0.
-            A(2 * N, 2 * N) = 1.
+            ! Alternative BC for row 2N (Dirichlet, switched off): 1 * Ts(2N) = T_in. The last pane still sees T_in
+            ! through conduction in row 2N-1 (A(2N-1,2N) = -k(N)); the heat flux into the room is k(N)*(Ts(2N-1) - T_in).
+            ! A(2 * N, 2 * N - 1) = 0.
+            ! A(2 * N, 2 * N) = 1.
 
             if (N > 1) then
                 do i = 1, N - 1
@@ -295,9 +296,9 @@ contains
             call gauss_solve(A, B, Ts_star)
 
             Ts = Ts + 0.5 * (Ts_star - Ts)
-            ! Dirichlet BC: pin the room-facing surface exactly to T_in; the 0.5 under-relaxation above would
-            ! otherwise only halve its error each iteration. Remove this line when reverting to the original BC.
-            Ts(2 * N) = T_in
+            ! Dirichlet BC only (switched off): pin the room-facing surface exactly to T_in; the 0.5 under-relaxation
+            ! above would otherwise only halve its error each iteration. Uncomment together with the Dirichlet rows above.
+            ! Ts(2 * N) = T_in
             res = maxval(abs(Ts - Ts_old))
 
             if (allocated(h_gap)) then
